@@ -89,6 +89,35 @@
   color: inherit !important;
 }
 
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring {
+  flex: 0 0 auto;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
+  overflow: visible;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring-track {
+  stroke: color-mix(in srgb, var(--foreground, #1F1E1D) 16%, transparent);
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring-fill {
+  stroke: var(--primary, #2563EB);
+  transition: stroke-dashoffset 200ms ease, stroke 160ms ease;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring.ag-ctx-warn .ag-ctx-ring-fill {
+  stroke: #B45309 !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring.ag-ctx-crit .ag-ctx-ring-fill {
+  stroke: #DC2626 !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ring-after {
+  display: inline-block;
+}
+
 :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-sep,
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-sep {
   margin: 0 3px;
@@ -152,8 +181,8 @@
 #ag-live-metrics-tooltip {
   position: fixed;
   z-index: 2147483647;
-  min-width: 340px;
-  max-width: 450px;
+  min-width: 350px;
+  max-width: 480px;
   padding: 10px 12px;
   border-radius: 8px;
   background-color: var(--popover, var(--card, #FFFFFF)) !important;
@@ -322,4 +351,231 @@
 :is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-copy-btn:hover {
   background-color: rgba(251, 191, 36, 0.24) !important;
   border-color: rgba(251, 191, 36, 0.55) !important;
+}
+
+/* 精简版圆环与上浮胶囊图像化进度条扩展（复用 Antigravity 原生变量并保留清晰语义分级色） */
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring-track {
+  stroke: color-mix(in srgb, var(--foreground, #EAEBF1) 20%, transparent) !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring-fill {
+  stroke: var(--primary, #60A5FA) !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring.ag-ctx-warn .ag-ctx-ring-fill {
+  stroke: #FBBF24 !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-ring.ag-ctx-crit .ag-ctx-ring-fill {
+  stroke: #F87171 !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-hdr-meta {
+  font-weight: 500 !important;
+  font-size: 10.5px !important;
+  color: var(--muted-foreground, rgba(128, 128, 128, 0.85)) !important;
+  margin-left: 10px;
+}
+
+#ag-live-metrics-tooltip .ag-tt-row-merged {
+  align-items: center;
+  margin-top: 2px;
+  gap: 12px;
+}
+
+#ag-live-metrics-tooltip .ag-tt-nowrap {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#ag-live-metrics-tooltip .ag-tt-compact-left,
+#ag-live-metrics-tooltip .ag-tt-compact-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+#ag-live-metrics-tooltip .ag-tt-cache-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  line-height: 1.35 !important;
+  border: 1px solid transparent;
+}
+
+#ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-good {
+  background-color: rgba(53, 108, 97, 0.13) !important;
+  border-color: rgba(53, 108, 97, 0.27) !important;
+  color: #2B5E53 !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-fair {
+  background-color: rgba(166, 124, 62, 0.14) !important;
+  border-color: rgba(166, 124, 62, 0.29) !important;
+  color: #8A6228 !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-low {
+  background-color: rgba(217, 119, 87, 0.15) !important;
+  border-color: rgba(217, 119, 87, 0.31) !important;
+  color: #9A482B !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-bad {
+  background-color: rgba(185, 28, 28, 0.15) !important;
+  border-color: rgba(185, 28, 28, 0.30) !important;
+  color: #B91C1C !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-split-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+#ag-live-metrics-tooltip .ag-tt-split-track {
+  display: inline-flex;
+  width: 92px;
+  height: 6.5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--foreground, #000000) 10%, transparent);
+  flex-shrink: 0;
+}
+
+#ag-live-metrics-tooltip .ag-tt-split-think {
+  height: 100%;
+  background-color: #D97757;
+}
+
+#ag-live-metrics-tooltip .ag-tt-split-resp {
+  height: 100%;
+  background-color: var(--primary, #3F6E7A);
+}
+
+#ag-live-metrics-tooltip .ag-tt-split-ratio {
+  font-size: 10.5px !important;
+  font-weight: 500 !important;
+  color: var(--muted-foreground, rgba(128, 128, 128, 0.85)) !important;
+  white-space: nowrap;
+}
+
+#ag-live-metrics-tooltip .ag-tt-think-lbl {
+  color: #9A482B !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-resp-lbl {
+  color: var(--primary, #2E5661) !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-bar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+#ag-live-metrics-tooltip .ag-tt-ctx-bar {
+  display: inline-block;
+  width: 88px;
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--foreground, #000000) 8%, transparent);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.24));
+  flex-shrink: 0;
+}
+
+#ag-live-metrics-tooltip .ag-tt-ctx-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #CFA063 0%, #D97757 100%);
+  transition: width 200ms ease;
+}
+
+#ag-live-metrics-tooltip .ag-tt-ctx-fill.ag-ctx-crit {
+  background: linear-gradient(90deg, #EF4444 0%, #DC2626 100%) !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-bar-lbl {
+  font-weight: 600 !important;
+  color: var(--popover-foreground, var(--foreground, currentColor)) !important;
+  white-space: nowrap;
+}
+
+#ag-live-metrics-tooltip .ag-tt-num-good {
+  color: #2B5E53 !important;
+  font-weight: 600 !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-num-fair {
+  color: #8A6228 !important;
+  font-weight: 600 !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-num-low {
+  color: #9A482B !important;
+  font-weight: 600 !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-num-bad {
+  color: #DC2626 !important;
+  font-weight: 600 !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-think-lbl {
+  color: #E5A48B !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-resp-lbl {
+  color: var(--primary, #93C5FD) !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-good {
+  background-color: rgba(132, 181, 165, 0.17) !important;
+  border-color: rgba(132, 181, 165, 0.30) !important;
+  color: #8EC0AF !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-fair {
+  background-color: rgba(214, 180, 117, 0.17) !important;
+  border-color: rgba(214, 180, 117, 0.30) !important;
+  color: #DFBE82 !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-low {
+  background-color: rgba(224, 122, 95, 0.18) !important;
+  border-color: rgba(224, 122, 95, 0.32) !important;
+  color: #E59B82 !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-cache-tag.ag-cache-bad {
+  background-color: rgba(185, 28, 28, 0.28) !important;
+  border-color: rgba(248, 113, 113, 0.36) !important;
+  color: #F87171 !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-split-think {
+  background-color: #E07A5F;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-num-good {
+  color: #8EC0AF !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-num-fair {
+  color: #DFBE82 !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-num-low {
+  color: #E59B82 !important;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-num-bad {
+  color: #F87171 !important;
 }

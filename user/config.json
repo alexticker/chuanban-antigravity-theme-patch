@@ -1,6 +1,7 @@
 {
   "enabled": true,
   "channel": "auto",
+  "metricsMode": "compact",
   "contextLimit": 256000,
   "modules": {
     "i18n": true,

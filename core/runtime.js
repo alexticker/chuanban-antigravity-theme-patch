@@ -1743,6 +1743,13 @@
     const RE_SEE_ALL = /^See all\s*\((\d+)\)$/i;
     const RE_SHOW_BREAKDOWNS = /^Show\s+(\d+)\s+breakdowns?$/i;
     const RE_SHOW_MORE_SUBAGENTS = /^Show\s+(\d+)\s+more\s+subagents?$/i;
+    const RE_SWARM_WORKER_ROLE = /^Swarm\s+Worker\s*\(([^()\r\n]{1,100})\)(?:\s*\(([^()\r\n]{1,40})\))?$/i;
+    const RE_OPEN_SUBAGENT = /^Open\s+Subagent:\s*(.+)$/i;
+    const RE_INVOKED_SUBAGENT = /^Invoked\s+subagent:\s*(.+)$/i;
+    const RE_BROWSER_TASK = /^Browser\s+task:\s*(.+)$/i;
+    const RE_SUBAGENTS_COUNT = /^(\d+)\s+subagents?$/i;
+    const RE_PAREN_SUBAGENTS = /^\((\d+)\s+subagents?\)$/i;
+    const RE_ARIA_PANE_HEADER = /^(.+?)\s+header$/i;
     const RE_SHOW_EARLIER_STEPS = /^Show\s+(\d+)\s+earlier\s+steps?$/i;
     const RE_SORT_FILTER_ACTIVE = /^Sort and filter conversations\s*\((\d+)\s+active\)$/i;
     const RE_STILL_THINKING_SEC = /^Still thinking,\s*(\d+)\s*seconds?$/i;
@@ -1966,7 +1973,28 @@
       return !!(el && el.closest && el.closest('header, [data-testid="breadcrumb-segment"]'));
     }
 
-    function computeTextTranslation(raw, contextEl) {
+    const SUBAGENT_BUILTIN_LABEL_MAP = {
+      subagent: '子 Agent',
+      'browser subagent': '浏览器子 Agent',
+      'browser task': '浏览器任务',
+      'research subagent': '调研子 Agent',
+      'swarm worker': '蜂群协作者'
+    };
+
+    function translateSubagentLabel(rawLabel) {
+      const s = String(rawLabel || '').trim();
+      if (!s) return s;
+      const mapped = SUBAGENT_BUILTIN_LABEL_MAP[s.toLowerCase()];
+      if (mapped) return mapped;
+      if (RE_SWARM_WORKER_ROLE.test(s)) {
+        return s.replace(RE_SWARM_WORKER_ROLE, (_, name, suffix) =>
+          suffix ? '蜂群协作者 (' + name + ') (' + suffix + ')' : '蜂群协作者 (' + name + ')'
+        );
+      }
+      return s;
+    }
+
+    function computeTextTranslation(raw, contextEl, textNode = null) {
       if (!raw) return null;
       const trimmed = raw.trim();
       if (!trimmed) return null;
@@ -2020,6 +2048,7 @@
         if (RE_PINNED_COUNT.test(trimmed)) return raw.replace(RE_PINNED_COUNT, '$1 个已固定标签页');
         if (RE_MODELS_SELECTED.test(trimmed)) return raw.replace(RE_MODELS_SELECTED, '已选择 $1 个模型');
         if (RE_BROWSER_STEPS.test(trimmed)) return raw.replace(RE_BROWSER_STEPS, '$1 个浏览器步骤');
+        if (RE_SUBAGENTS_COUNT.test(trimmed)) return raw.replace(RE_SUBAGENTS_COUNT, '$1 个子 Agent');
         const mMediaAtt = trimmed.match(RE_MEDIA_ATTACHMENTS);
         if (mMediaAtt) {
           const mediaMap = { image: '图片', audio: '音频', video: '视频' };
@@ -2106,7 +2135,35 @@
           return raw.replace(RE_SWARM_YOU_SUFFIX, '$1（您）');
         }
       }
+      if (c0 === 40) {
+        if (RE_PAREN_SUBAGENTS.test(trimmed)) {
+          return raw.replace(RE_PAREN_SUBAGENTS, '（$1 个子 Agent）');
+        }
+      }
+      if (
+        (raw === ' subagent' || raw === 's') &&
+        contextEl &&
+        contextEl.closest &&
+        contextEl.closest('[data-testid="subagent-node"]')
+      ) {
+        if (raw === ' subagent') return ' 个子 Agent';
+        if (raw === 's') {
+          if (textNode && textNode.previousSibling && textNode.previousSibling.nodeType === 3) {
+            const prevNode = textNode.previousSibling;
+            const prevOrig = (origTextMap.get(prevNode)?.origRaw || prevNode.nodeValue || '').trim();
+            const prevCur = (prevNode.nodeValue || '').trim();
+            if (/^subagent$/i.test(prevOrig) || /个子 Agent$/.test(prevCur)) return '';
+          } else if (/\(\d+\s*(?:subagent|个子 Agent)s?\)/i.test(contextEl.textContent || '')) {
+            return '';
+          }
+        }
+      }
       if (firstUpper === 'S') {
+        if (RE_SWARM_WORKER_ROLE.test(trimmed)) {
+          return raw.replace(RE_SWARM_WORKER_ROLE, (_, name, suffix) =>
+            suffix ? '蜂群协作者 (' + name + ') (' + suffix + ')' : '蜂群协作者 (' + name + ')'
+          );
+        }
         if (RE_SEE_ALL.test(trimmed)) return raw.replace(RE_SEE_ALL, '查看全部 ($1)');
         if (RE_SHOW_BREAKDOWNS.test(trimmed)) return raw.replace(RE_SHOW_BREAKDOWNS, '展开明细 ($1 项)');
         if (RE_SHOW_MORE_SUBAGENTS.test(trimmed)) return raw.replace(RE_SHOW_MORE_SUBAGENTS, '显示另外 $1 个子 Agent');
@@ -2265,6 +2322,32 @@
       } else if (firstUpper === 'O') {
         if (RE_ORCHESTRATOR_MODEL.test(trimmed)) {
           return raw.replace(RE_ORCHESTRATOR_MODEL, '编排器 ($1)');
+        }
+        const mOpenSub = trimmed.match(RE_OPEN_SUBAGENT);
+        if (mOpenSub) {
+          const innerZh = translateSubagentLabel(mOpenSub[1]);
+          return raw.replace(trimmed, () => '打开子 Agent：' + innerZh);
+        }
+        if (
+          contextEl &&
+          contextEl.closest &&
+          contextEl.closest('[data-testid="subagent-permission-source"]') &&
+          /^Open\s+(.+)$/i.test(trimmed)
+        ) {
+          const inner = trimmed.replace(/^Open\s+/i, '').trim();
+          const innerZh = translateSubagentLabel(inner);
+          return raw.replace(trimmed, () => '打开 ' + innerZh);
+        }
+      } else if (firstUpper === 'I') {
+        const mInvSub = trimmed.match(RE_INVOKED_SUBAGENT);
+        if (mInvSub) {
+          const innerZh = translateSubagentLabel(mInvSub[1]);
+          return raw.replace(trimmed, () => '已调用子 Agent：' + innerZh);
+        }
+      } else if (firstUpper === 'B') {
+        const mBrTask = trimmed.match(RE_BROWSER_TASK);
+        if (mBrTask) {
+          return raw.replace(trimmed, () => '浏览器任务：' + mBrTask[1].trim());
         }
       } else if (firstUpper === 'C') {
         if (
@@ -2470,7 +2553,7 @@
       }
       const origRaw = rec && rec.lastVal === currentVal ? rec.origRaw : currentVal;
 
-      const nextVal = computeTextTranslation(origRaw, node.parentElement);
+      const nextVal = computeTextTranslation(origRaw, node.parentElement, node);
       if (nextVal !== null) {
         origTextMap.set(node, { origRaw, lastVal: nextVal, ver: PATCH_VERSION });
         if (node.nodeValue !== nextVal) {
@@ -2618,6 +2701,23 @@
       const mOpenPlugin = atrim.match(RE_OPEN_PLUGIN_NAME);
       if (mOpenPlugin) {
         return '打开 ' + mOpenPlugin[1].trim() + ' 插件';
+      }
+      const mOpenSubAttr = atrim.match(RE_OPEN_SUBAGENT);
+      if (mOpenSubAttr) {
+        const innerZh = translateSubagentLabel(mOpenSubAttr[1]);
+        return '打开子 Agent：' + innerZh;
+      }
+      const mPaneHdr = atrim.match(RE_ARIA_PANE_HEADER);
+      if (
+        mPaneHdr &&
+        el &&
+        el.closest &&
+        el.closest('[data-testid*="pane"], [role="region"], header')
+      ) {
+        const baseZh = dictLookup(mPaneHdr[1].trim());
+        if (typeof baseZh === 'string') {
+          return baseZh + (/[A-Za-z0-9]$/.test(baseZh) ? ' 标题栏' : '标题栏');
+        }
       }
       const mEditSq = atrim.match(RE_EDIT_SIDE_Q_TITLE);
       if (mEditSq) {
