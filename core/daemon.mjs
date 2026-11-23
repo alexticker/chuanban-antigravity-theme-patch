@@ -486,9 +486,9 @@ function resolveActiveChannelEndpoints(channelMode = 'auto', userCfg = {}) {
 }
 
 // ============================================================================
-// 2. 动态构建注入载荷（支持 core/ + user/ 实时合并与热更新签名）
+// 2. 动态构建注入载荷（仅保留 i18n 汉化与实时会话指标胶囊，支持 core/ + user/ 2.5s 热重载）
 // ============================================================================
-const BASE_VERSION = '20261122-v5.5.5';
+const BASE_VERSION = '20261123-v5.5.5-lite';
 let cachedBundleSig = '';
 let cachedInjectScript = '';
 let cachedIframeInjectScript = '';
@@ -499,14 +499,6 @@ const metricsCache = new Map(); // dbPath -> { sig, payload }
 // when user/config.json contextLimit differs from the default, which would otherwise hit the TDZ.
 const lastBestEffortPayloadCache = new Map(); // dbPath -> payload
 const incrementalMetricsMap = new Map(); // dbPath -> { rowCount, maxIdx, userStepsCount, lastUserStepIdx, items, validItems, totalIn, totalCache, totalOut, totalThink, totalResp }
-const tokenAnalyticsDbCache = new Map(); // dbPath -> { sig, parsed, _inc }
-const tokenAnalyticsSummariesCache = new Map(); // summariesDbPath -> { sig, map }
-let lastTokenAnalyticsAccessMs = 0;
-let tokenAnalyticsDiskLoaded = false;
-let tokenAnalyticsPersistTimer = null;
-let tokenAnalyticsLastJsonCache = { dataRef: null, jsonStr: '' };
-let inFlightTokenAnalyticsPromise = null;
-let inFlightTokenAnalyticsKey = '';
 const MAX_METRICS_CACHE_SIZE = 30;
 
 function setMetricsCache(dbPath, entry) {
@@ -533,24 +525,16 @@ function setIncrementalMetrics(dbPath, state) {
 let activeConfig = {
   enabled: true,
   channel: 'auto',
-  preset: 'high-contrast',
-  darkPreset: 'onyx',
   contextLimit: 256000,
   contextLimitOverride: 0,
   modules: {
     i18n: true,
     metrics: true,
-    tokenAnalytics: true,
-    composerWaxSeal: true,
-    deadlockHealer: true,
-    coldBootHealer: true,
-    zoomShortcuts: true,
     cdpAutoRelaunch: true,
+    cdpEventDiscovery: true,
     customCss: true,
     customJs: true
   },
-  themeVars: {},
-  darkThemeVars: {},
   allowedOrigins: [
     'http://127.0.0.1',
     'https://127.0.0.1',
@@ -575,112 +559,6 @@ function normalizeOverrideDict(rawObj) {
   return clean;
 }
 
-const HOST_CONFIG_PATH = path.join(os.homedir(), '.gemini', 'config', 'config.json');
-let cachedHostCfgFileSig = '';
-let cachedHostThemeMode = null;
-
-function persistDarkPresetToUserConfig(rawDarkPreset) {
-  if (SAFE_MODE) return false;
-  const nextDarkPreset = String(rawDarkPreset || '').trim().toLowerCase() === 'claude-warm' ? 'claude-warm' : 'onyx';
-  const cfgPath = path.join(USER_DIR, 'config.json');
-  const tmpPath = `${cfgPath}.tmp-${process.pid}`;
-  try {
-    fs.mkdirSync(USER_DIR, { recursive: true });
-    let currentObj = {};
-    if (fs.existsSync(cfgPath)) {
-      let parsed = null;
-      try {
-        const rawText = fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, '');
-        parsed = JSON.parse(rawText);
-      } catch (parseErr) {
-        logDaemonEvent(`persistDarkPreset skipped: user/config.json unreadable (${parseErr?.message || parseErr})`);
-        return false;
-      }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        logDaemonEvent('persistDarkPreset skipped: user/config.json root is not a plain object');
-        return false;
-      }
-      currentObj = parsed;
-    }
-    const prevNorm =
-      String(currentObj.darkPreset || 'onyx').trim().toLowerCase() === 'claude-warm' ? 'claude-warm' : 'onyx';
-    if (prevNorm === nextDarkPreset && currentObj.darkPreset === nextDarkPreset) {
-      return false;
-    }
-    const updatedObj = {};
-    let inserted = false;
-    for (const [k, v] of Object.entries(currentObj)) {
-      if (k === 'darkPreset') {
-        updatedObj.darkPreset = nextDarkPreset;
-        inserted = true;
-      } else {
-        updatedObj[k] = v;
-        if (k === 'preset' && !('darkPreset' in currentObj)) {
-          updatedObj.darkPreset = nextDarkPreset;
-          inserted = true;
-        }
-      }
-    }
-    if (!inserted) {
-      updatedObj.darkPreset = nextDarkPreset;
-    }
-    fs.writeFileSync(tmpPath, `${JSON.stringify(updatedObj, null, 2)}\n`, 'utf8');
-    fs.renameSync(tmpPath, cfgPath);
-    if (rebuildBundleIfNeeded()) {
-      void (async () => {
-        const pageEntries = [];
-        const iframeEntries = [];
-        for (const [, entry] of attachedTargets.entries()) {
-          if (!entry?.hostConfirmed) continue;
-          if (entry.type === 'iframe') iframeEntries.push(entry);
-          else pageEntries.push(entry);
-        }
-        for (const batch of [pageEntries, iframeEntries]) {
-          await Promise.allSettled(
-            batch.map(async (entry) => {
-              await entry.updateNewDocScript?.();
-              await entry.inject?.();
-              if (entry.type === 'page') {
-                await entry.syncMetricsForSession?.(true);
-              }
-            })
-          );
-        }
-      })();
-    }
-    return true;
-  } catch (err) {
-    try {
-      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-    } catch {}
-    logDaemonEvent(`persistDarkPreset error: ${err?.message || err}`);
-    return false;
-  }
-}
-
-function readHostThemeMode() {
-  const fileSig = getFileMtimeSig(HOST_CONFIG_PATH);
-  if (fileSig === cachedHostCfgFileSig) {
-    return cachedHostThemeMode;
-  }
-  cachedHostCfgFileSig = fileSig;
-  if (fileSig === '0:0') {
-    cachedHostThemeMode = null;
-    return null;
-  }
-  try {
-    const hostCfg = readJsonSafe(HOST_CONFIG_PATH, {});
-    const raw = String(hostCfg?.userSettings?.themeMode || '').toUpperCase();
-    if (raw === 'THEME_MODE_DARK') cachedHostThemeMode = 'dark';
-    else if (raw === 'THEME_MODE_LIGHT') cachedHostThemeMode = 'light';
-    else if (raw === 'THEME_MODE_INHERIT') cachedHostThemeMode = 'inherit';
-    else cachedHostThemeMode = null;
-  } catch {
-    cachedHostThemeMode = null;
-  }
-  return cachedHostThemeMode;
-}
-
 function rebuildBundleIfNeeded() {
   const coreFiles = [
     path.join(CORE_DIR, 'theme.css'),
@@ -696,10 +574,9 @@ function rebuildBundleIfNeeded() {
         path.join(USER_DIR, 'custom.js')
       ];
 
-  const hostThemeMode = readHostThemeMode();
   const sig =
     [...coreFiles, ...userFiles].map(getFileMtimeSig).join('|') +
-    `|hostTheme:${hostThemeMode || ''}|safe:${SAFE_MODE}|cli:${CLI_CHANNEL || ''}`;
+    `|safe:${SAFE_MODE}|cli:${CLI_CHANNEL || ''}`;
   if (sig === cachedBundleSig && cachedInjectScript) {
     return false;
   }
@@ -707,18 +584,6 @@ function rebuildBundleIfNeeded() {
   const userCfg = SAFE_MODE ? {} : readJsonSafe(path.join(USER_DIR, 'config.json'), {});
   const enabled = SAFE_MODE ? true : userCfg.enabled !== false;
   const channel = CLI_CHANNEL || userCfg.channel || 'auto';
-  const preset = userCfg.preset || 'high-contrast';
-  const rawDarkPreset = String(userCfg.darkPreset || 'onyx').trim().toLowerCase();
-  const darkPreset =
-    rawDarkPreset === 'claude-warm' ||
-    rawDarkPreset === 'warm-paper-night' ||
-    rawDarkPreset === 'claude-night' ||
-    rawDarkPreset === '暖炭'
-      ? 'claude-warm'
-      : 'onyx';
-  if (activeConfig && darkPreset !== activeConfig.darkPreset) {
-    targetDarkPresets.clear();
-  }
   const rawCtxLimit = Number(userCfg.contextLimit);
   const contextLimit = Number.isFinite(rawCtxLimit) && rawCtxLimit > 0 ? rawCtxLimit : 256000;
   const rawCtxOverride = Number(userCfg.contextLimitOverride);
@@ -736,32 +601,19 @@ function rebuildBundleIfNeeded() {
   if (typeof rawModules.metricsCapsule === 'boolean' && typeof rawModules.metrics !== 'boolean') {
     rawModules.metrics = rawModules.metricsCapsule;
   }
-  const modules = Object.assign(
-    {
-      i18n: true,
-      metrics: true,
-      tokenAnalytics: true,
-      composerWaxSeal: true,
-      deadlockHealer: true,
-      coldBootHealer: true,
-      zoomShortcuts: true,
-      cdpAutoRelaunch: true,
-      cdpEventDiscovery: true,
-      googleFonts: true,
-      customCss: true,
-      customJs: true
-    },
-    rawModules
-  );
+  const modules = {
+    i18n: rawModules.i18n !== false,
+    metrics: rawModules.metrics !== false,
+    cdpAutoRelaunch: rawModules.cdpAutoRelaunch !== false,
+    cdpEventDiscovery: rawModules.cdpEventDiscovery !== false,
+    customCss: rawModules.customCss !== false,
+    customJs: rawModules.customJs !== false
+  };
   if (!DatabaseSync) {
     modules.metrics = false;
-    modules.tokenAnalytics = false;
   }
   modules.metricsCapsule = modules.metrics;
 
-  const themeVars = !SAFE_MODE && userCfg.themeVars && typeof userCfg.themeVars === 'object' ? userCfg.themeVars : {};
-  const darkThemeVars =
-    !SAFE_MODE && userCfg.darkThemeVars && typeof userCfg.darkThemeVars === 'object' ? userCfg.darkThemeVars : {};
   const endpoints = resolveActiveChannelEndpoints(channel, userCfg);
 
   const normalizedSelectors = Object.assign({}, userCfg.selectors || {});
@@ -805,14 +657,6 @@ function rebuildBundleIfNeeded() {
     normalizedSelectors.excludeI18n +=
       ', [data-uri^="file:"], [data-uri^="vscode-"], a.inline-pill[href^="file:"], a.inline-pill[href^="vscode-"]';
   }
-  if (
-    typeof normalizedSelectors.excludeI18n === 'string' &&
-    normalizedSelectors.excludeI18n.trim() &&
-    !normalizedSelectors.excludeI18n.includes('ag-token-analytics-panel')
-  ) {
-    normalizedSelectors.excludeI18n +=
-      ', #ag-token-nav-section, #ag-token-analytics-panel, #ag-ta-tooltip, [data-ag-token-ui]';
-  }
 
   const DEFAULT_ALLOWED_ORIGINS = [
     'http://127.0.0.1',
@@ -826,13 +670,9 @@ function rebuildBundleIfNeeded() {
   activeConfig = {
     enabled,
     channel,
-    preset,
-    darkPreset,
     contextLimit,
     contextLimitOverride,
     modules,
-    themeVars,
-    darkThemeVars,
     selectors: normalizedSelectors,
     allowedOrigins: Array.isArray(userCfg.allowedOrigins)
       ? Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...userCfg.allowedOrigins]))
@@ -861,13 +701,8 @@ function rebuildBundleIfNeeded() {
     .update(customJs)
     .update(
       JSON.stringify({
-        preset,
-        darkPreset,
         modules,
-        themeVars,
-        darkThemeVars,
-        selectors: activeConfig.selectors,
-        hostThemeMode
+        selectors: activeConfig.selectors
       })
     )
     .digest('hex')
@@ -876,54 +711,35 @@ function rebuildBundleIfNeeded() {
   const channelTag = channel === 'insiders' ? 'insiders' : 'stable';
   cachedPatchVersion = `${BASE_VERSION}-${channelTag}-${hash}`;
 
-  const RE_STRIP_TA_CSS = /\/\* __AG_TOKEN_ANALYTICS_CSS_START__ \*\/[\s\S]*?\/\* __AG_TOKEN_ANALYTICS_CSS_END__ \*\//g;
-  const RE_STRIP_TA_JS = /\/\* __AG_TOKEN_ANALYTICS_JS_START__ \*\/[\s\S]*?\/\* __AG_TOKEN_ANALYTICS_JS_END__ \*\//g;
-
-  const pageCss = modules.tokenAnalytics ? baseCss : baseCss.replace(RE_STRIP_TA_CSS, '');
-  const pageRuntime = modules.tokenAnalytics
-    ? runtimeTemplate
-    : runtimeTemplate.replace(RE_STRIP_TA_JS, '  cleanupTokenAnalyticsDom();');
-
   const bootPayload = {
     version: cachedPatchVersion,
     platform: process.platform,
-    hostThemeMode,
     enabled,
-    preset,
-    darkPreset,
-    cssText: pageCss,
+    cssText: modules.metrics ? baseCss : '',
     customCss,
-    themeVars,
-    darkThemeVars,
     i18nDict: mergedDict,
     modules,
     selectors: activeConfig.selectors,
     config: {
       enabled,
       channel,
-      preset,
-      darkPreset,
       contextLimit,
       contextLimitOverride,
-      modules,
-      themeVars,
-      darkThemeVars
+      modules
     },
     customJs
   };
 
-  cachedInjectScript = pageRuntime.replace('})(__AG_BOOT_PAYLOAD__);', () => `})(${JSON.stringify(bootPayload)});`);
+  cachedInjectScript = runtimeTemplate.replace('})(__AG_BOOT_PAYLOAD__);', () => `})(${JSON.stringify(bootPayload)});`);
 
-  // Swarm 等跨进程子 iframe 永不承载设置弹窗，固定裁剪 Token 统计 CSS+JS（单 iframe 立减 ~100 KB，且保持同一 version 哈希）
-  const iframeCss = baseCss.replace(RE_STRIP_TA_CSS, '');
-  const iframeRuntime = runtimeTemplate.replace(RE_STRIP_TA_JS, '');
-  const iframeModules = Object.assign({}, modules, { tokenAnalytics: false });
+  // Swarm 子 iframe 无需指标胶囊样式，仅保留 i18n
+  const iframeModules = Object.assign({}, modules, { metrics: false, metricsCapsule: false });
   const iframePayload = Object.assign({}, bootPayload, {
-    cssText: iframeCss,
+    cssText: '',
     modules: iframeModules,
     config: Object.assign({}, bootPayload.config, { modules: iframeModules })
   });
-  cachedIframeInjectScript = iframeRuntime.replace(
+  cachedIframeInjectScript = runtimeTemplate.replace(
     '})(__AG_BOOT_PAYLOAD__);',
     () => `})(${JSON.stringify(iframePayload)});`
   );
@@ -935,8 +751,6 @@ function rebuildBundleIfNeeded() {
 // 3. 单实例 PID 锁与协作式所有权围栏（防跨周期陈旧锁自杀、防跨完整性双实例并存）
 // ============================================================================
 const attachedTargets = new Map();
-const targetThemeModes = new Map();
-const targetDarkPresets = new Map();
 const targetMetaMap = new Map();
 const skippedNonHostTargets = new Map(); // targetId -> { origin, skippedAt }
 const browserWatchers = new Map(); // `${channel}:${port}` -> { ws, wsUrl, port, channel, endpoint, reconnectAfterMs, closing }
@@ -1137,8 +951,6 @@ function shutdownDaemon(reason, unlinkStopFile = false) {
   attachedTargets.clear();
   attachingTargetIds.clear();
   destroyedWhileAttaching.clear();
-  targetThemeModes.clear();
-  targetDarkPresets.clear();
   targetMetaMap.clear();
   skippedNonHostTargets.clear();
   process.exit(0);
@@ -2708,1528 +2520,8 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
 }
 
 // ============================================================================
-// 4.5 SQLite 全量增量 Token 统计分析（系统设置弹窗「Token 统计」Tab）
-// ============================================================================
-
-const TA_MEM_FILE_RE = /(?:^|[\\/])MEMORY\.md$|[\\/]\.gemini[\\/]antigravity[\\/]knowledge[\\/]|[\\/]memories[\\/]/i;
-const TA_SLUG_LABELS = {
-  'gemini-pro-orchestrator': 'Orchestrator (Carbon)',
-  'gemini-pro-orchestrator-neon': 'Orchestrator (Neon)',
-  'gemini-pro-orchestrator-g1-pro': 'Orchestrator (Argon)',
-  'gemini-pro-orchestrator-argon': 'Orchestrator (Argon)',
-  'gemini-pro-orchestrator-carbon': 'Orchestrator (Carbon)',
-  'gemini-flash-worker-agy': 'Gemini 4 Hydrogen (Orchestrator)',
-  'gemini-4-hydrogen': 'Gemini 4 Hydrogen',
-  'gemini-4-hydrogen-tiered-high': 'Gemini 4 Hydrogen (High)',
-  'gemini-4-argon': 'Gemini 4 Argon',
-  'gemini-4-argon-trial': 'Gemini 4 Argon',
-  'gemini-4-carbon': 'Gemini 4 Carbon',
-  'gemini-4-neon': 'Gemini 4 Neon',
-  'gemini-3.8-flash-n': 'Gemini 3.8 Flash',
-  'gemini-3.8-flash-tiered': 'Gemini 3.8 Flash',
-  'claude-sonnet-5-5': 'Claude Sonnet 5.5',
-  'claude-sonnet-5-5-medium': 'Claude Sonnet 5.5 (Medium)',
-  'claude-sonnet-5-5-high': 'Claude Sonnet 5.5 (High)',
-  'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
-  'claude-opus-5-5-medium': 'Claude Opus 5.5 (Medium)',
-  'claude-opus-5-5-high': 'Claude Opus 5.5 (High)',
-  'gpt-oss-120b-medium': 'GPT-OSS 120B (Medium)'
-};
-
-const TA_CACHE_SCHEMA_REV = 3;
-const TA_CACHE_FILE = path.join(CACHE_DIR, 'token-analytics-index.json');
-const TA_CACHE_SALT = crypto
-  .createHash('sha1')
-  .update(
-    JSON.stringify({
-      v: BASE_VERSION,
-      rev: TA_CACHE_SCHEMA_REV,
-      slugs: TA_SLUG_LABELS,
-      memRe: TA_MEM_FILE_RE.source
-    })
-  )
-  .digest('hex')
-  .slice(0, 16);
-
-const taParseProtoAll = parseProtoAll;
-
-function taParsePackedVarints(buf) {
-  const out = [];
-  if (!buf || typeof buf.length !== 'number') return out;
-  let i = 0;
-  while (i < buf.length) {
-    let v = 0;
-    let s = 0;
-    while (i < buf.length) {
-      const b = buf[i++];
-      v |= (b & 0x7f) << s;
-      if (!(b & 0x80)) break;
-      s += 7;
-      if (s > 35) return out;
-    }
-    out.push(v);
-  }
-  return out;
-}
-
-function taGetField(fields, num) {
-  return fields.find((x) => x.f === num);
-}
-
-function taGetAllFields(fields, num) {
-  return fields.filter((x) => x.f === num);
-}
-
-function taFieldToStr(f) {
-  return f?.buf ? textDecoder.decode(f.buf) : '';
-}
-
-function taInspectToolArgsForMemory(toolName, argsBuf) {
-  if (/^memory_/i.test(toolName)) return true;
-  if (!argsBuf || argsBuf.length === 0) return false;
-  const headSample = textDecoder.decode(argsBuf.length > 4096 ? argsBuf.subarray(0, 4096) : argsBuf);
-  if (!/memory|memories|knowledge/i.test(headSample)) return false;
-  try {
-    const obj = JSON.parse(textDecoder.decode(argsBuf));
-    const pathVal = String(
-      obj?.Path || obj?.TargetFile || obj?.File || obj?.path || obj?.file_path || obj?.uri || ''
-    ).trim();
-    return Boolean(pathVal && TA_MEM_FILE_RE.test(pathVal));
-  } catch {
-    return false;
-  }
-}
-
-function taInspectStepMetadata(metaBuf, isToolStep) {
-  let ts = 0;
-  let isExitPlan = false;
-  let hasMemoryPath = false;
-  if (!metaBuf || !metaBuf.length) return { ts, isExitPlan, hasMemoryPath };
-  let toolChecked = !isToolStep;
-  for (const fld of taParseProtoAll(metaBuf, true)) {
-    if (ts === 0 && fld.w === 2 && fld.buf.length >= 2 && fld.buf.length <= 24) {
-      const sub = taParseProtoAll(fld.buf);
-      const sec = taGetField(sub, 1)?.v;
-      if (sec && sec > 1700000000 && sec < 1900000000) ts = sec;
-    } else if (!toolChecked && fld.f === 4 && fld.w === 2 && fld.buf.length >= 8) {
-      toolChecked = true;
-      let tName = '';
-      let tArgsBuf = null;
-      for (const tcFld of taParseProtoAll(fld.buf, true)) {
-        if (tcFld.f === 2 && tcFld.w === 2 && !tcFld.partial) {
-          tName = textDecoder.decode(tcFld.buf);
-        } else if (tcFld.f === 3 && tcFld.w === 2) {
-          tArgsBuf = tcFld.buf;
-        }
-      }
-      if (tName === 'exit_plan_mode') isExitPlan = true;
-      hasMemoryPath = taInspectToolArgsForMemory(tName, tArgsBuf);
-    }
-    if (ts > 0 && toolChecked) break;
-  }
-  return { ts, isExitPlan, hasMemoryPath };
-}
-
-function taResolveStepLookup(stepTs, fallbackSec) {
-  const sorted = [...stepTs.keys()].sort((a, b) => a - b);
-  return (stepIdx) => {
-    if (stepTs.has(stepIdx)) return stepTs.get(stepIdx);
-    let lo = 0;
-    let hi = sorted.length - 1;
-    let best = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      if (sorted[mid] <= stepIdx) {
-        best = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    if (best >= 0) return stepTs.get(sorted[best]);
-    return sorted.length > 0 ? stepTs.get(sorted[0]) : fallbackSec;
-  };
-}
-
-function taExtractUserStepPlanConfig(payloadBuf) {
-  if (!payloadBuf || !payloadBuf.length) return null;
-  const top = taParseProtoAll(payloadBuf);
-  const u19 = taGetField(top, 19);
-  if (!u19?.buf) return null;
-  const u19Fields = taParseProtoAll(u19.buf);
-  let plannerEnum = 0;
-  let execEnum = 0;
-  let planFlag = false;
-  const mc12 = taGetField(u19Fields, 12);
-  if (mc12?.buf) {
-    const mc1 = taGetField(taParseProtoAll(mc12.buf), 1);
-    if (mc1?.buf) {
-      const mcFields = taParseProtoAll(mc1.buf);
-      plannerEnum = taGetField(mcFields, 1)?.v || 0;
-      const f60 = taGetField(mcFields, 60);
-      if (f60?.buf) {
-        execEnum = taGetField(taParseProtoAll(f60.buf), 1)?.v || 0;
-      }
-    }
-  }
-  const u18 = taGetField(u19Fields, 18);
-  if (u18?.buf) {
-    const f3 = taGetField(taParseProtoAll(u18.buf), 3);
-    if (f3?.buf) {
-      const f1 = taGetField(taParseProtoAll(f3.buf), 1);
-      if (f1?.buf) {
-        planFlag = taParseProtoAll(f1.buf).some((x) => x.f === 6 && x.v === 1);
-      }
-    }
-  }
-  return {
-    orchestrator: Boolean(execEnum > 0 || planFlag),
-    plannerEnum,
-    execEnum
-  };
-}
-
-function taResolvePlanStateLookup(planTimeline) {
-  if (!Array.isArray(planTimeline) || planTimeline.length === 0) {
-    return () => null;
-  }
-  return (stepIdx) => {
-    let lo = 0;
-    let hi = planTimeline.length - 1;
-    let best = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      if (planTimeline[mid].idx <= stepIdx) {
-        best = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return best >= 0 ? planTimeline[best] : null;
-  };
-}
-
-function taGetDbFileSig(dbPath) {
-  return getSqliteFileSig(dbPath, { trackUnc: true });
-}
-
-function taNormalizeSlashPath(raw) {
-  let s = String(raw || '').trim();
-  if (!s) return '';
-  if (s.startsWith('file://')) {
-    s = s.slice(7);
-    try {
-      s = decodeURIComponent(s);
-    } catch {}
-  }
-  s = s.replace(/\\/g, '/');
-  if (/^\/[A-Za-z]:\//.test(s)) {
-    s = s.slice(1);
-  }
-  if (!s.startsWith('//')) {
-    s = s.replace(/\/{2,}/g, '/');
-  } else {
-    s = '//' + s.slice(2).replace(/\/{2,}/g, '/');
-  }
-  if (s.length > 1 && !/^[A-Za-z]:\/$/.test(s)) {
-    s = s.replace(/\/+$/, '');
-  }
-  return s || '/';
-}
-
-const TA_NORMALIZED_OS_TMP = taNormalizeSlashPath(os.tmpdir()).toLowerCase();
-
-function taIsTempPath(p) {
-  if (!p) return false;
-  const low = p.toLowerCase();
-  if (TA_NORMALIZED_OS_TMP && TA_NORMALIZED_OS_TMP.length > 1) {
-    if (low === TA_NORMALIZED_OS_TMP || low.startsWith(`${TA_NORMALIZED_OS_TMP}/`)) return true;
-  }
-  return (
-    /^(?:\/private)?\/tmp(?:\/|$)/i.test(low) ||
-    /^\/var\/folders(?:\/|$)/i.test(low) ||
-    /^[a-z]:\/users\/[^/]+\/appdata\/local\/temp(?:\/|$)/i.test(low) ||
-    /^[a-z]:\/windows\/temp(?:\/|$)/i.test(low) ||
-    /^\/mnt\/[a-z]\/users\/[^/]+\/appdata\/local\/temp(?:\/|$)/i.test(low)
-  );
-}
-
-function taParseWorkspaceUrisList(workspaceUris) {
-  if (!workspaceUris) return [];
-  if (Array.isArray(workspaceUris)) {
-    return workspaceUris.map((x) => taNormalizeSlashPath(x)).filter(Boolean);
-  }
-  const str = String(workspaceUris).trim();
-  if (!str) return [];
-  if (str.startsWith('[')) {
-    try {
-      const arr = JSON.parse(str);
-      if (Array.isArray(arr)) {
-        return arr.map((x) => taNormalizeSlashPath(x)).filter(Boolean);
-      }
-    } catch {}
-  }
-  const decoded = taNormalizeSlashPath(str);
-  return decoded ? [decoded] : [];
-}
-
-function taNormalizeProjectInfo(workspaceUris, projectId = '') {
-  const paths = taParseWorkspaceUrisList(workspaceUris);
-  const nonTemp = paths.find((p) => !taIsTempPath(p));
-  const chosen = nonTemp || paths[0] || '';
-  const pid = String(projectId || '').trim();
-
-  if (!chosen || (pid === 'outside-of-project' && !nonTemp)) {
-    return {
-      key: '__none__',
-      name: '未绑定项目',
-      rawBasename: '未绑定项目',
-      path: '',
-      isTemp: false
-    };
-  }
-
-  if (taIsTempPath(chosen)) {
-    return {
-      key: '__tmp__',
-      name: '临时目录 (/tmp)',
-      rawBasename: '临时目录 (/tmp)',
-      path: '/tmp',
-      isTemp: true
-    };
-  }
-
-  const parts = chosen.split('/').filter(Boolean);
-  const base = parts[parts.length - 1] || chosen;
-  const isCaseInsensitive =
-    process.platform === 'darwin' ||
-    process.platform === 'win32' ||
-    /^[a-z]:\//i.test(chosen) ||
-    /^\/mnt\/[a-z]\//i.test(chosen);
-  return {
-    key: isCaseInsensitive ? chosen.toLowerCase() : chosen,
-    name: base,
-    rawBasename: base,
-    path: chosen,
-    isTemp: false
-  };
-}
-
-function taClassifyModelPool({ label = '', slug = '', modelEnum = '', usedClaude = '' } = {}) {
-  const combined = `${label} ${slug} ${modelEnum}`.toLowerCase();
-  if (combined.includes('argon')) return 'Argon';
-  if (combined.includes('claude') || combined.includes('gpt')) return 'Claude & GPT';
-  if (combined.includes('gemini') || combined.includes('orchestrator')) return 'Gemini';
-  if (String(usedClaude).toLowerCase() === 'true') return 'Claude & GPT';
-  return 'Gemini';
-}
-
-function taNormalizeModelLabel({ label = '', slug = '', modelEnum = '', enumId = 0 } = {}) {
-  const trimmedLabel = String(label || '').trim();
-  if (trimmedLabel) return trimmedLabel;
-  const trimmedSlug = String(slug || '').trim();
-  if (trimmedSlug && TA_SLUG_LABELS[trimmedSlug]) return TA_SLUG_LABELS[trimmedSlug];
-  if (trimmedSlug) return trimmedSlug;
-  if (modelEnum) return String(modelEnum).trim();
-  return `model-${enumId || 'unknown'}`;
-}
-
-function taFormatOrchestratorModelLabel(label) {
-  const trimmed = String(label || '').trim();
-  if (!trimmed || /orchestrator/i.test(trimmed)) return trimmed;
-  let core = trimmed.replace(/^Gemini\s+4\s+/i, '');
-  const parenMatch = core.match(/^(.+?)\s*\(([^()]+)\)$/);
-  if (parenMatch) {
-    core = `${parenMatch[1].trim()} · ${parenMatch[2].trim()}`;
-  }
-  return `Orchestrator (${core})`;
-}
-
-function taResolveCallScenario(callBaseScenario, isSubagent, source) {
-  if (isSubagent) return 'subagent';
-  if (callBaseScenario === 'planning' || callBaseScenario === 'memory') return callBaseScenario;
-  if (source === 'cli') return 'internal';
-  return callBaseScenario || 'internal';
-}
-
-function taParseIsoSeconds(val) {
-  if (!val) return 0;
-  const str = String(val).trim();
-  if (!str || str.startsWith('0001-01-01')) return 0;
-  const ms = Date.parse(str.includes('T') ? str : str.replace(' ', 'T'));
-  if (!Number.isFinite(ms) || ms <= 0) return 0;
-  return Math.floor(ms / 1000);
-}
-
-function taToLocalDateString(tsSec) {
-  const d = new Date(tsSec * 1000);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-function taReadSummariesIndex(summariesDbPath) {
-  const map = new Map();
-  if (!summariesDbPath || !fs.existsSync(summariesDbPath)) return map;
-  try {
-    withReadOnlyDb(summariesDbPath, 150, (db) => {
-      const rows = db
-        .prepare(
-          `SELECT conversation_id, title, workspace_uris, project_id, source, agent_name,
-                  parent_conversation_id, nesting_depth, last_modified_time
-           FROM conversation_summaries`
-        )
-        .all();
-      for (const r of rows) {
-        if (!r?.conversation_id) continue;
-        map.set(r.conversation_id, {
-          id: r.conversation_id,
-          title: String(r.title || '').trim(),
-          workspaceUris: String(r.workspace_uris || ''),
-          projectId: String(r.project_id || ''),
-          source: String(r.source || '') === 'CORTEX_TRAJECTORY_SOURCE_CLI' ? 'cli' : 'desktop',
-          agentName: String(r.agent_name || '').trim(),
-          parentId: String(r.parent_conversation_id || '').trim(),
-          nestingDepth: Number(r.nesting_depth || 0) || 0,
-          lastModifiedSec: taParseIsoSeconds(r.last_modified_time)
-        });
-      }
-    });
-    return map;
-  } catch {
-    return null;
-  }
-}
-
-function taLoadSummariesCached(summariesDbPath, force) {
-  if (!summariesDbPath) return new Map();
-  const sigInfo = taGetDbFileSig(summariesDbPath);
-  if (!sigInfo) return new Map();
-  const cached = tokenAnalyticsSummariesCache.get(summariesDbPath);
-  if (force !== 'hard' && cached && cached.sig === sigInfo.sig) {
-    return cached.map;
-  }
-  const fresh = taReadSummariesIndex(summariesDbPath);
-  if (fresh) {
-    tokenAnalyticsSummariesCache.set(summariesDbPath, { sig: sigInfo.sig, map: fresh });
-    return fresh;
-  }
-  return cached ? cached.map : new Map();
-}
-
-function taParseGenMetadataRowToCall(row, { lookupTs, lookupPlanState, stepByIdx, compactionStepIndices, trajParentId, state }) {
-  const top = taParseProtoAll(row.data);
-  const chatField = taGetField(top, 1);
-  if (!chatField?.buf) return null;
-  const chat = taParseProtoAll(chatField.buf);
-  const usageField = taGetField(chat, 4);
-  if (!usageField?.buf) return null;
-  const usage = taParseProtoAll(usageField.buf);
-
-  const kv = {};
-  for (const entry of taGetAllFields(chat, 20)) {
-    const pair = taParseProtoAll(entry.buf);
-    const k = taFieldToStr(taGetField(pair, 1));
-    if (k) kv[k] = taFieldToStr(taGetField(pair, 2));
-  }
-
-  const stepIndicesField = taGetField(top, 2);
-  const stepIndices = stepIndicesField?.buf ? taParsePackedVarints(stepIndicesField.buf) : [];
-  const refStep = stepIndices.length > 0 ? stepIndices[0] : Number(kv.last_step_index) || 0;
-  const ts = lookupTs(refStep);
-
-  let hasStep132 = false;
-  let hasStep15 = false;
-  let hasLinkedStep = false;
-  let hasMemoryStep = false;
-  let hasExitPlanStep = false;
-  let hasNearbyCompaction = false;
-  for (const sIdx of stepIndices) {
-    const info = stepByIdx.get(sIdx);
-    if (info) {
-      hasLinkedStep = true;
-      if (info.stepType === 132) hasStep132 = true;
-      else if (info.stepType === 15) hasStep15 = true;
-      if (info.hasMemoryPath) hasMemoryStep = true;
-      if (info.isExitPlan) hasExitPlanStep = true;
-    }
-    if (
-      compactionStepIndices.has(sIdx) ||
-      compactionStepIndices.has(sIdx - 1) ||
-      compactionStepIndices.has(sIdx + 1)
-    ) {
-      hasNearbyCompaction = true;
-    }
-  }
-  if (!hasNearbyCompaction && stepIndices.length === 0 && refStep > 0) {
-    if (
-      compactionStepIndices.has(refStep) ||
-      compactionStepIndices.has(refStep - 1) ||
-      compactionStepIndices.has(refStep + 1)
-    ) {
-      hasNearbyCompaction = true;
-    }
-  }
-
-  const slug = taFieldToStr(taGetField(chat, 19));
-  const rawLabel = taFieldToStr(taGetField(chat, 21));
-  const enumId = taGetField(usage, 1)?.v || taGetField(chat, 3)?.v || 0;
-  const modelEnum = kv.model_enum || '';
-  const usedClaude = kv.used_claude || '';
-  const baseLabel = taNormalizeModelLabel({ label: rawLabel, slug, modelEnum, enumId });
-  const pool = taClassifyModelPool({ label: baseLabel, slug, modelEnum, usedClaude });
-
-  const slugLower = String(slug || '').toLowerCase();
-  const labelTrim = String(baseLabel || '').trim();
-  const planSt = lookupPlanState(refStep);
-  let isOrchestratorPlanning = false;
-  if (slugLower.includes('worker')) {
-    isOrchestratorPlanning = false;
-  } else if (slugLower.includes('orchestrator') || /^orchestrator\b/i.test(labelTrim)) {
-    isOrchestratorPlanning = true;
-  } else if (hasExitPlanStep) {
-    isOrchestratorPlanning = true;
-  } else if (planSt?.orchestrator) {
-    if (planSt.plannerEnum > 0 && planSt.execEnum > 0 && planSt.plannerEnum !== planSt.execEnum) {
-      isOrchestratorPlanning = enumId === planSt.plannerEnum;
-    } else {
-      isOrchestratorPlanning = Boolean(planSt.inPlanPhase);
-    }
-  }
-
-  let baseScenario = 'internal';
-  if (isOrchestratorPlanning) {
-    baseScenario = 'planning';
-  } else if (hasNearbyCompaction || hasMemoryStep) {
-    baseScenario = 'memory';
-  } else if (hasLinkedStep) {
-    if (hasStep132) baseScenario = 'tools';
-    else if (hasStep15) baseScenario = 'chat';
-  }
-
-  const inTok = taGetField(usage, 2)?.v || 0;
-  const outTok = taGetField(usage, 3)?.v || 0;
-  const cacheRead = taGetField(usage, 5)?.v || 0;
-  const thinkTok = taGetField(usage, 9)?.v || 0;
-  const respTok = taGetField(usage, 10)?.v || 0;
-
-  const subagentType = String(kv.subagent_type || '').trim();
-  const parentCascadeId = String(kv.parent_cascade_id || '').trim();
-  const rootCascadeId = String(kv.root_cascade_id || '').trim();
-  if (!state.firstParentCascadeId && parentCascadeId) state.firstParentCascadeId = parentCascadeId;
-  if (!state.firstRootCascadeId && rootCascadeId) state.firstRootCascadeId = rootCascadeId;
-  if (!state.firstSubagentType && subagentType) state.firstSubagentType = subagentType;
-
-  const isSubagentCall = Boolean(trajParentId || state.firstParentCascadeId || subagentType);
-  const finalModelLabel =
-    isOrchestratorPlanning && !isSubagentCall ? taFormatOrchestratorModelLabel(baseLabel) : baseLabel;
-
-  return {
-    gIdx: row.idx,
-    ts,
-    model: finalModelLabel,
-    pool,
-    inTok,
-    cacheRead,
-    outTok,
-    thinkTok,
-    respTok,
-    total: inTok + cacheRead + outTok,
-    weighted: Math.round(inTok + 0.1 * cacheRead + 6 * outTok),
-    billable: inTok + outTok,
-    baseScenario,
-    subagentType
-  };
-}
-
-function taIngestStepRow(row, stepTs, stepByIdx, compactionStepIndices, planTimeline, planCursor) {
-  const { ts, isExitPlan, hasMemoryPath } = taInspectStepMetadata(row.metadata, row.step_type === 132);
-  if (ts > 0) stepTs.set(row.idx, ts);
-  if (row.step_type === 23) compactionStepIndices.add(row.idx);
-  if (row.step_type === 14 && row.step_payload) {
-    const cfg = taExtractUserStepPlanConfig(row.step_payload);
-    if (cfg) {
-      planCursor.cur = { ...cfg, inPlanPhase: cfg.orchestrator };
-      planTimeline.push({ ...planCursor.cur, idx: row.idx });
-    }
-  } else if (row.step_type === 101 && row.step_payload && planCursor.cur.orchestrator) {
-    const headStr = textDecoder.decode(row.step_payload);
-    if (headStr.includes('Plan mode is off:') && planCursor.cur.inPlanPhase) {
-      planCursor.cur = { ...planCursor.cur, inPlanPhase: false };
-      planTimeline.push({ ...planCursor.cur, idx: row.idx });
-    } else if (headStr.includes('[plan review]') && !planCursor.cur.inPlanPhase) {
-      planCursor.cur = { ...planCursor.cur, inPlanPhase: true };
-      planTimeline.push({ ...planCursor.cur, idx: row.idx });
-    }
-  }
-  stepByIdx.set(row.idx, { stepType: row.step_type, hasMemoryPath, isExitPlan });
-}
-
-function taParseConversationDetailDb(dbPath, statInfo, prevCacheEntry = null) {
-  const dbId = path.basename(dbPath, '.db');
-  try {
-    return withReadOnlyDb(dbPath, 150, (db) => {
-      const fallbackSec = Math.floor((statInfo?.mtimeMs || fs.statSync(dbPath).mtimeMs || Date.now()) / 1000);
-
-      let trajParentId = '';
-      let trajRootId = '';
-      let trajWorkspaceUri = '';
-      let trajProjectId = '';
-      try {
-        const mrow = db.prepare('SELECT data FROM trajectory_metadata_blob LIMIT 1').get();
-        if (mrow?.data) {
-          const mf = taParseProtoAll(mrow.data);
-          trajParentId = taFieldToStr(taGetField(mf, 5)).trim();
-          trajRootId = taFieldToStr(taGetField(mf, 6)).trim();
-          trajWorkspaceUri = taFieldToStr(taGetField(mf, 7)).trim();
-          trajProjectId = taFieldToStr(taGetField(mf, 18)).trim();
-          if (!trajWorkspaceUri) {
-            const wsField = taGetField(mf, 1);
-            if (wsField?.buf) {
-              const wsSub = taParseProtoAll(wsField.buf);
-              trajWorkspaceUri =
-                taFieldToStr(taGetField(wsSub, 1)).trim() || taFieldToStr(taGetField(wsSub, 2)).trim();
-            }
-          }
-        }
-      } catch {}
-
-      const gmStat = db.prepare('SELECT COUNT(*) AS cnt, COALESCE(MAX(idx), -1) AS maxIdx FROM gen_metadata').get();
-      const genCount = Number(gmStat?.cnt || 0);
-      const maxGenIdx = Number(gmStat?.maxIdx ?? -1);
-      if (genCount === 0) {
-        return {
-          ok: true,
-          dbId,
-          mtimeSec: fallbackSec,
-          trajMeta: {
-            parentId: trajParentId,
-            rootId: trajRootId,
-            subagentType: '',
-            workspaceUri: trajWorkspaceUri,
-            projectId: trajProjectId
-          },
-          calls: [],
-          _inc: null
-        };
-      }
-
-      const stStat = db.prepare('SELECT COUNT(*) AS cnt, COALESCE(MAX(idx), -1) AS maxIdx FROM steps').get();
-      const stepCount = Number(stStat?.cnt || 0);
-      const maxStepIdx = Number(stStat?.maxIdx ?? -1);
-
-      const prevInc = prevCacheEntry?._inc;
-      const prevParsed = prevCacheEntry?.parsed;
-      const startStepIdx = prevInc ? Math.max(0, prevInc.maxStepIdx - 4) : 0;
-      const startGenIdx = prevInc ? Math.max(0, prevInc.maxGenIdx - 1) : 0;
-      let anchorValid = false;
-      if (
-        prevInc &&
-        prevParsed?.ok &&
-        genCount >= prevInc.genCount &&
-        maxGenIdx >= prevInc.maxGenIdx &&
-        stepCount >= prevInc.stepCount &&
-        maxStepIdx >= prevInc.maxStepIdx
-      ) {
-        if (startGenIdx > 0 && prevInc.anchorIdx >= 0) {
-          const prefixCnt = db.prepare('SELECT COUNT(*) AS cnt FROM gen_metadata WHERE idx < ?').get(startGenIdx)?.cnt ?? -1;
-          const aRow = db
-            .prepare('SELECT length(data) AS len, hex(substr(data, 1, 24)) AS hex FROM gen_metadata WHERE idx = ?')
-            .get(prevInc.anchorIdx);
-          anchorValid = Boolean(
-            prefixCnt === prevInc.frozenGenCount &&
-              aRow &&
-              aRow.len === prevInc.anchorLen &&
-              aRow.headHex === undefined &&
-              aRow.hex === prevInc.anchorHex
-          );
-        } else {
-          anchorValid = startGenIdx === 0;
-        }
-      }
-
-      if (anchorValid) {
-        // 回退重读末尾 2 条 gen_metadata 与末尾 5 条 steps，兼顾邻近压缩步 (sIdx+1) 与流式尾行原地更新，并精确拦截 Undo 重写
-        const deltaSteps = db
-          .prepare(
-            `SELECT idx, step_type, metadata,
-                    CASE
-                      WHEN step_type = 14 THEN step_payload
-                      WHEN step_type = 101 THEN substr(step_payload, 1, 1024)
-                      ELSE NULL
-                    END AS step_payload
-             FROM steps
-             WHERE idx >= ?
-             ORDER BY idx ASC`
-          )
-          .all(startStepIdx);
-        const deltaGenRows = db
-          .prepare('SELECT idx, data FROM gen_metadata WHERE idx >= ? ORDER BY idx ASC')
-          .all(startGenIdx);
-
-        const baseCalls = prevParsed.calls.filter((c) => typeof c.gIdx === 'number' && c.gIdx < startGenIdx);
-        if (baseCalls.length + deltaGenRows.length <= genCount) {
-          const stepTs = new Map(prevInc.stepTs);
-          const stepByIdx = new Map(prevInc.stepByIdx);
-          const compactionStepIndices = new Set(prevInc.compactionStepIndices);
-          for (const k of [...stepTs.keys()]) {
-            if (k >= startStepIdx) stepTs.delete(k);
-          }
-          for (const k of [...stepByIdx.keys()]) {
-            if (k >= startStepIdx) stepByIdx.delete(k);
-          }
-          for (const k of [...compactionStepIndices]) {
-            if (k >= startStepIdx) compactionStepIndices.delete(k);
-          }
-          const planTimeline = prevInc.planTimeline.filter((p) => p.idx < startStepIdx);
-          let seedCur = { orchestrator: false, plannerEnum: 0, execEnum: 0, inPlanPhase: false };
-          if (planTimeline.length > 0) {
-            const lastPt = planTimeline[planTimeline.length - 1];
-            seedCur = {
-              orchestrator: Boolean(lastPt.orchestrator),
-              plannerEnum: lastPt.plannerEnum || 0,
-              execEnum: lastPt.execEnum || 0,
-              inPlanPhase: Boolean(lastPt.inPlanPhase)
-            };
-          }
-          const planCursor = { cur: seedCur };
-          for (const row of deltaSteps) {
-            taIngestStepRow(row, stepTs, stepByIdx, compactionStepIndices, planTimeline, planCursor);
-          }
-          const lookupTs = taResolveStepLookup(stepTs, fallbackSec);
-          const lookupPlanState = taResolvePlanStateLookup(planTimeline);
-          const lineageState = {
-            firstParentCascadeId: prevInc.firstParentCascadeId || '',
-            firstRootCascadeId: prevInc.firstRootCascadeId || '',
-            firstSubagentType: prevInc.firstSubagentType || ''
-          };
-          for (const row of deltaGenRows) {
-            const c = taParseGenMetadataRowToCall(row, {
-              lookupTs,
-              lookupPlanState,
-              stepByIdx,
-              compactionStepIndices,
-              trajParentId,
-              state: lineageState
-            });
-            if (c) baseCalls.push(c);
-          }
-          const nextStartGenIdx = Math.max(0, maxGenIdx - 1);
-          const nextFrozenCnt = nextStartGenIdx > 0
-            ? db.prepare('SELECT COUNT(*) AS cnt FROM gen_metadata WHERE idx < ?').get(nextStartGenIdx)?.cnt ?? 0
-            : 0;
-          const nextFrozenRow = nextStartGenIdx > 0
-            ? db
-                .prepare('SELECT idx, length(data) AS len, hex(substr(data, 1, 24)) AS hex FROM gen_metadata WHERE idx < ? ORDER BY idx DESC LIMIT 1')
-                .get(nextStartGenIdx)
-            : null;
-          return {
-            ok: true,
-            dbId,
-            mtimeSec: fallbackSec,
-            trajMeta: {
-              parentId: trajParentId || lineageState.firstParentCascadeId,
-              rootId: trajRootId || lineageState.firstRootCascadeId,
-              subagentType: lineageState.firstSubagentType,
-              workspaceUri: trajWorkspaceUri,
-              projectId: trajProjectId
-            },
-            calls: baseCalls,
-            _inc: {
-              genCount,
-              maxGenIdx,
-              stepCount,
-              maxStepIdx,
-              frozenGenCount: nextFrozenCnt,
-              anchorIdx: nextFrozenRow ? nextFrozenRow.idx : -1,
-              anchorLen: nextFrozenRow ? nextFrozenRow.len : 0,
-              anchorHex: nextFrozenRow ? nextFrozenRow.hex : '',
-              stepTs,
-              stepByIdx,
-              compactionStepIndices,
-              planTimeline,
-              firstParentCascadeId: lineageState.firstParentCascadeId,
-              firstRootCascadeId: lineageState.firstRootCascadeId,
-              firstSubagentType: lineageState.firstSubagentType
-            }
-          };
-        }
-      }
-
-      const stepTs = new Map();
-      const stepByIdx = new Map();
-      const compactionStepIndices = new Set();
-      const planTimeline = [];
-      const planCursor = { cur: { orchestrator: false, plannerEnum: 0, execEnum: 0, inPlanPhase: false } };
-
-      // 整列读取 metadata（保障 100% exit_plan_mode 与长工具参数零截断丢失），CASE 跳过占全库 92% 体积的 step_type=132 step_payload 溢出页；
-      // 使用 .all() 避免 Node 22.13~22.14 StatementSync.iterate() 链式临时对象在循环内遭 V8 GC 提前析构触发 ERR_INVALID_STATE / 0xC0000005
-      for (const row of db
-        .prepare(
-          `SELECT idx, step_type, metadata,
-                  CASE
-                    WHEN step_type = 14 THEN step_payload
-                    WHEN step_type = 101 THEN substr(step_payload, 1, 1024)
-                    ELSE NULL
-                  END AS step_payload
-           FROM steps
-           ORDER BY idx ASC`
-        )
-        .all()) {
-        taIngestStepRow(row, stepTs, stepByIdx, compactionStepIndices, planTimeline, planCursor);
-      }
-      const lookupTs = taResolveStepLookup(stepTs, fallbackSec);
-      const lookupPlanState = taResolvePlanStateLookup(planTimeline);
-
-      const calls = [];
-      const lineageState = {
-        firstParentCascadeId: '',
-        firstRootCascadeId: '',
-        firstSubagentType: ''
-      };
-
-      const allGenRows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
-      for (const row of allGenRows) {
-        const c = taParseGenMetadataRowToCall(row, {
-          lookupTs,
-          lookupPlanState,
-          stepByIdx,
-          compactionStepIndices,
-          trajParentId,
-          state: lineageState
-        });
-        if (c) calls.push(c);
-      }
-
-      const nextStartGenIdx = Math.max(0, maxGenIdx - 1);
-      let fullFrozenCnt = 0;
-      let lastFrozenGen = null;
-      if (nextStartGenIdx > 0) {
-        for (const row of allGenRows) {
-          if (row.idx < nextStartGenIdx) {
-            fullFrozenCnt += 1;
-            lastFrozenGen = row;
-          }
-        }
-      }
-      const fullAnchorIdx = lastFrozenGen ? lastFrozenGen.idx : -1;
-      const fullAnchorLen = lastFrozenGen?.data ? lastFrozenGen.data.length : 0;
-      const fullAnchorHex =
-        lastFrozenGen?.data
-          ? Buffer.from(lastFrozenGen.data.subarray(0, Math.min(24, lastFrozenGen.data.length))).toString('hex').toUpperCase()
-          : '';
-
-      return {
-        ok: true,
-        dbId,
-        mtimeSec: fallbackSec,
-        trajMeta: {
-          parentId: trajParentId || lineageState.firstParentCascadeId,
-          rootId: trajRootId || lineageState.firstRootCascadeId,
-          subagentType: lineageState.firstSubagentType,
-          workspaceUri: trajWorkspaceUri,
-          projectId: trajProjectId
-        },
-        calls,
-        _inc: {
-          genCount,
-          maxGenIdx,
-          stepCount,
-          maxStepIdx,
-          frozenGenCount: fullFrozenCnt,
-          anchorIdx: fullAnchorIdx,
-          anchorLen: fullAnchorLen,
-          anchorHex: fullAnchorHex,
-          stepTs,
-          stepByIdx,
-          compactionStepIndices,
-          planTimeline,
-          firstParentCascadeId: lineageState.firstParentCascadeId,
-          firstRootCascadeId: lineageState.firstRootCascadeId,
-          firstSubagentType: lineageState.firstSubagentType
-        }
-      };
-    });
-  } catch (err) {
-    return {
-      ok: false,
-      dbId,
-      error: err?.message || String(err)
-    };
-  }
-}
-
-function taChooseCanonicalProjectNames(projVotes) {
-  const canonical = new Map();
-  for (const [key, voteMap] of projVotes.entries()) {
-    const candidates = [...voteMap.entries()].sort((a, b) => {
-      if (b[1] !== a[1]) return b[1] - a[1];
-      const aUpper = /^[A-Z]/.test(a[0]) ? 1 : 0;
-      const bUpper = /^[A-Z]/.test(b[0]) ? 1 : 0;
-      if (bUpper !== aUpper) return bUpper - aUpper;
-      return a[0].localeCompare(b[0]);
-    });
-    canonical.set(key, candidates[0]?.[0] || key);
-  }
-  return canonical;
-}
-
-const yieldEventLoop = () => new Promise((resolve) => setImmediate(resolve));
-const sleepAsync = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function loadTokenAnalyticsDiskCacheIfNeeded(force) {
-  if (SAFE_MODE) return;
-  if (force === 'hard') {
-    tokenAnalyticsDbCache.clear();
-    tokenAnalyticsSummariesCache.clear();
-    tokenAnalyticsDiskLoaded = true;
-    return;
-  }
-  if (tokenAnalyticsDiskLoaded || tokenAnalyticsDbCache.size > 0) return;
-  tokenAnalyticsDiskLoaded = true;
-  try {
-    const raw = await fs.promises.readFile(TA_CACHE_FILE, 'utf8');
-    const obj = JSON.parse(raw);
-    if (!obj || obj.salt !== TA_CACHE_SALT || !obj.entries || typeof obj.entries !== 'object') {
-      await fs.promises.unlink(TA_CACHE_FILE).catch(() => {});
-      return;
-    }
-    for (const [dbPath, item] of Object.entries(obj.entries)) {
-      if (item && typeof item.sig === 'string' && item.parsed?.ok && Array.isArray(item.parsed.calls)) {
-        tokenAnalyticsDbCache.set(dbPath, { sig: item.sig, parsed: item.parsed, _inc: null });
-      }
-    }
-  } catch (err) {
-    if (err && err.code !== 'ENOENT') {
-      await fs.promises.unlink(TA_CACHE_FILE).catch(() => {});
-    }
-  }
-}
-
-let tokenAnalyticsFlushInFlight = false;
-let tokenAnalyticsFlushPending = false;
-
-async function flushTokenAnalyticsDiskCacheAsync() {
-  if (SAFE_MODE || RUN_ONCE || daemonExiting || tokenAnalyticsDbCache.size === 0) return;
-  if (tokenAnalyticsFlushInFlight) {
-    tokenAnalyticsFlushPending = true;
-    return;
-  }
-  tokenAnalyticsFlushInFlight = true;
-  try {
-    do {
-      tokenAnalyticsFlushPending = false;
-      if (SAFE_MODE || RUN_ONCE || daemonExiting || tokenAnalyticsDbCache.size === 0) break;
-      const entries = Object.create(null);
-      for (const [dbPath, item] of tokenAnalyticsDbCache.entries()) {
-        if (item && item.sig && item.parsed?.ok) {
-          entries[dbPath] = { sig: item.sig, parsed: item.parsed };
-        }
-      }
-      const tmpFile = `${TA_CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
-      try {
-        await fs.promises.mkdir(CACHE_DIR, { recursive: true });
-        const payloadStr = JSON.stringify({ salt: TA_CACHE_SALT, updatedAt: Date.now(), entries });
-        await fs.promises.writeFile(tmpFile, payloadStr, 'utf8');
-        const retryDelays = [0, 60, 160, 360];
-        let renamed = false;
-        for (let i = 0; i < retryDelays.length; i++) {
-          if (retryDelays[i] > 0) await sleepAsync(retryDelays[i]);
-          try {
-            await fs.promises.rename(tmpFile, TA_CACHE_FILE);
-            renamed = true;
-            break;
-          } catch (renErr) {
-            const code = renErr?.code || '';
-            if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') break;
-          }
-        }
-        if (!renamed) {
-          await fs.promises.unlink(tmpFile).catch(() => {});
-        }
-      } catch {
-        await fs.promises.unlink(tmpFile).catch(() => {});
-      }
-    } while (tokenAnalyticsFlushPending);
-  } finally {
-    tokenAnalyticsFlushInFlight = false;
-  }
-}
-
-function scheduleTokenAnalyticsDiskPersist() {
-  if (SAFE_MODE || RUN_ONCE || daemonExiting) return;
-  if (tokenAnalyticsPersistTimer) clearTimeout(tokenAnalyticsPersistTimer);
-  tokenAnalyticsPersistTimer = setTimeout(() => {
-    tokenAnalyticsPersistTimer = null;
-    void flushTokenAnalyticsDiskCacheAsync();
-  }, 2000);
-  if (typeof tokenAnalyticsPersistTimer.unref === 'function') {
-    tokenAnalyticsPersistTimer.unref();
-  }
-}
-
-function normalizeDirPrefix(dirPath) {
-  const s = String(dirPath || '').replace(/[\\/]+$/, '');
-  return process.platform === 'win32' ? s.toLowerCase() + '\\' : s + '/';
-}
-
-function isPathInIncompleteDirs(filePath, incompletePrefixes) {
-  if (incompletePrefixes.size === 0) return false;
-  const norm = process.platform === 'win32' ? String(filePath || '').toLowerCase() : String(filePath || '');
-  for (const prefix of incompletePrefixes) {
-    if (norm.startsWith(prefix)) return true;
-  }
-  return false;
-}
-
-async function queryTokenAnalytics(
-  endpoint,
-  { maxDays = 365, force = false, nowSec = Math.floor(Date.now() / 1000) } = {}
-) {
-  lastTokenAnalyticsAccessMs = Date.now();
-  const t0 = performance.now();
-  await Promise.all([loadTokenAnalyticsDiskCacheIfNeeded(force), ensureWin32WslProbesWarmAsync(endpoint)]);
-  let sliceStartMs = performance.now();
-  const primaryDir =
-    endpoint?.conversationsDir || path.join(os.homedir(), endpoint?.geminiSubDir || '.gemini/antigravity', 'conversations');
-
-  const candidateDirs = [];
-  const pushDir = (d) => {
-    if (d && !candidateDirs.includes(d)) candidateDirs.push(d);
-  };
-  pushDir(primaryDir);
-
-  if (process.platform === 'win32' && !endpoint?.explicitConvDir && endpoint?.portFile) {
-    if (Date.now() >= wslUncBackoffUntil) {
-      const wslDirs = resolveWin32WslConversationsDirs(
-        endpoint.portFile,
-        endpoint.geminiSubDir || '.gemini/antigravity'
-      );
-      for (const wd of wslDirs) pushDir(wd);
-    } else {
-      // UNC 退避窗口内沿用已知 WSL 目录标记为 incomplete，保留其既有缓存参与汇总而不清空
-      const wslStatePath = path.join(path.dirname(endpoint.portFile), 'wsl_state.json');
-      const prevWsl = wslDirsCache.get(wslStatePath);
-      if (prevWsl?.dirs?.length) {
-        for (const wd of prevWsl.dirs) pushDir(wd);
-      }
-    }
-  }
-
-  const summaries = new Map();
-  const dbCandidateById = new Map(); // dbId -> { dbPath, sigInfo }
-  const incompleteDirPrefixes = new Set();
-  const wslConfiguredButOffline =
-    process.platform === 'win32' &&
-    !endpoint?.explicitConvDir &&
-    Boolean(endpoint?.portFile) &&
-    !candidateDirs.some((d) => isUncPath(d)) &&
-    inspectWin32WslProbeDemand(endpoint).hasWsl;
-  if (Date.now() < wslUncBackoffUntil || (wslConfiguredButOffline && force !== 'hard')) {
-    for (const cachedPath of tokenAnalyticsDbCache.keys()) {
-      if (isUncPath(cachedPath)) {
-        incompleteDirPrefixes.add(normalizeDirPrefix(path.dirname(cachedPath)));
-      }
-    }
-  }
-
-  for (const convDir of candidateDirs) {
-    const uncDir = isUncPath(convDir);
-    if (uncDir && Date.now() < wslUncBackoffUntil) {
-      incompleteDirPrefixes.add(normalizeDirPrefix(convDir));
-      continue;
-    }
-    const tDir = Date.now();
-    let dirExists = false;
-    try {
-      dirExists = fs.existsSync(convDir);
-    } catch {
-      dirExists = false;
-    }
-    if (markUncSlowIfExceeded(uncDir, tDir) || (uncDir && Date.now() < wslUncBackoffUntil)) {
-      incompleteDirPrefixes.add(normalizeDirPrefix(convDir));
-      if (!dirExists) continue;
-    }
-    if (!dirExists) continue;
-
-    const sumPath = path.join(path.dirname(convDir), 'conversation_summaries.db');
-    const sumMap = taLoadSummariesCached(sumPath, force);
-    for (const [k, v] of sumMap.entries()) {
-      if (!summaries.has(k)) summaries.set(k, v);
-    }
-
-    let entries = [];
-    try {
-      const tRead = Date.now();
-      entries = fs.readdirSync(convDir).filter((name) => name.endsWith('.db')).sort();
-      if (markUncSlowIfExceeded(uncDir, tRead)) {
-        incompleteDirPrefixes.add(normalizeDirPrefix(convDir));
-      }
-    } catch {
-      if (uncDir) incompleteDirPrefixes.add(normalizeDirPrefix(convDir));
-      entries = [];
-    }
-
-    const dirStatLoopStartMs = Date.now();
-    let statIter = 0;
-    for (const fileName of entries) {
-      if (uncDir) {
-        if (Date.now() < wslUncBackoffUntil || markUncSlowIfExceeded(true, dirStatLoopStartMs)) {
-          incompleteDirPrefixes.add(normalizeDirPrefix(convDir));
-          break;
-        }
-      }
-      const dbPath = path.join(convDir, fileName);
-      const dbId = path.basename(fileName, '.db');
-      const sigInfo = taGetDbFileSig(dbPath);
-      if (!sigInfo) {
-        if (uncDir && Date.now() < wslUncBackoffUntil) {
-          incompleteDirPrefixes.add(normalizeDirPrefix(convDir));
-          break;
-        }
-        continue;
-      }
-      const existing = dbCandidateById.get(dbId);
-      if (!existing || sigInfo.mtimeMs > existing.sigInfo.mtimeMs) {
-        dbCandidateById.set(dbId, { dbPath, sigInfo });
-      }
-      statIter += 1;
-      if (statIter % 80 === 0 && performance.now() - sliceStartMs >= 16) {
-        await yieldEventLoop();
-        sliceStartMs = performance.now();
-      }
-    }
-  }
-
-  const activePaths = new Set();
-  const parsedDbs = [];
-  const failedDbs = [];
-  let cacheHits = 0;
-  let cacheMisses = 0;
-  let missesSinceYield = 0;
-
-  // 若 UNC 目录因 400ms 预算中断未扫完，从既有缓存回填尚未 stat 到的会话库，避免 WSL 多库用户统计残缺
-  if (incompleteDirPrefixes.size > 0 && force !== 'hard') {
-    for (const [cachedPath, cachedItem] of tokenAnalyticsDbCache.entries()) {
-      if (!cachedItem?.parsed?.ok || !isPathInIncompleteDirs(cachedPath, incompleteDirPrefixes)) continue;
-      const dbId = cachedItem.parsed.dbId || path.basename(cachedPath, '.db');
-      if (!dbCandidateById.has(dbId)) {
-        activePaths.add(cachedPath);
-        cacheHits += 1;
-        parsedDbs.push(cachedItem.parsed);
-      }
-    }
-  }
-
-  // 按最新修改时间优先解析，每处理 8 个未命中库或单切片达 16ms 即让出事件循环，保障主窗口胶囊与 BrowserWatcher 零阻塞
-  const dbEntries = [...dbCandidateById.values()].sort(
-    (a, b) => (b.sigInfo.mtimeMs || 0) - (a.sigInfo.mtimeMs || 0) || a.dbPath.localeCompare(b.dbPath)
-  );
-  for (const { dbPath, sigInfo } of dbEntries) {
-    activePaths.add(dbPath);
-    const cached = force !== 'hard' ? tokenAnalyticsDbCache.get(dbPath) : null;
-    if (cached && cached.sig === sigInfo.sig) {
-      cacheHits += 1;
-      parsedDbs.push(cached.parsed);
-      continue;
-    }
-
-    const uncDb = isUncPath(dbPath);
-    if (uncDb && Date.now() < wslUncBackoffUntil) {
-      if (cached?.parsed) parsedDbs.push(cached.parsed);
-      continue;
-    }
-
-    cacheMisses += 1;
-    missesSinceYield += 1;
-    const tDbStart = Date.now();
-    const rawResult = taParseConversationDetailDb(dbPath, sigInfo, force !== 'hard' ? cached : null);
-    markUncSlowIfExceeded(uncDb, tDbStart);
-    if (rawResult.ok) {
-      const { _inc, ...compactParsed } = rawResult;
-      const keepInc = _inc && Date.now() - (sigInfo.mtimeMs || 0) < 86400000 ? _inc : null;
-      tokenAnalyticsDbCache.set(dbPath, { sig: sigInfo.sig, parsed: compactParsed, _inc: keepInc });
-      parsedDbs.push(compactParsed);
-    } else if (cached?.parsed) {
-      parsedDbs.push(cached.parsed);
-    } else {
-      failedDbs.push({ dbId: rawResult.dbId, error: rawResult.error });
-    }
-
-    if (missesSinceYield >= 8 || performance.now() - sliceStartMs >= 16) {
-      await yieldEventLoop();
-      sliceStartMs = performance.now();
-      missesSinceYield = 0;
-    }
-  }
-
-  let prunedCount = 0;
-  for (const oldPath of tokenAnalyticsDbCache.keys()) {
-    if (!activePaths.has(oldPath) && !isPathInIncompleteDirs(oldPath, incompleteDirPrefixes)) {
-      tokenAnalyticsDbCache.delete(oldPath);
-      prunedCount += 1;
-    }
-  }
-
-  if (cacheMisses > 0 || prunedCount > 0 || force === 'hard') {
-    scheduleTokenAnalyticsDiskPersist();
-  }
-
-  const cutoffSec = maxDays > 0 ? nowSec - maxDays * 86400 : 0;
-
-  const rawMetaById = new Map();
-  for (const parsed of parsedDbs) {
-    const id = parsed.dbId;
-    const sum = summaries.get(id);
-
-    const parentId = sum?.parentId || parsed.trajMeta.parentId || '';
-    const rawRoot = parsed.trajMeta.rootId || '';
-    const agentName = sum?.agentName || parsed.trajMeta.subagentType || '';
-    const isSubagent = Boolean(
-      (sum && sum.nestingDepth > 0) ||
-        parentId ||
-        agentName ||
-        (rawRoot && rawRoot !== id)
-    );
-    const source = sum?.source || 'desktop';
-    const workspaceUris = sum?.workspaceUris || parsed.trajMeta.workspaceUri || '';
-    const projectId = sum?.projectId || parsed.trajMeta.projectId || '';
-    const proj = taNormalizeProjectInfo(workspaceUris, projectId);
-
-    rawMetaById.set(id, {
-      id,
-      title: sum?.title || '',
-      source,
-      agentName,
-      parentId,
-      rawRoot,
-      isSubagent,
-      proj,
-      parsed
-    });
-  }
-
-  const resolvedMetaById = new Map();
-  const projectRegistry = new Map();
-
-  function resolveRootId(id) {
-    const seen = new Set();
-    let cur = id;
-    while (cur && !seen.has(cur)) {
-      seen.add(cur);
-      const m = rawMetaById.get(cur);
-      if (!m) break;
-      if (m.parentId && rawMetaById.has(m.parentId) && m.parentId !== cur) {
-        cur = m.parentId;
-        continue;
-      }
-      if (m.rawRoot && rawMetaById.has(m.rawRoot) && m.rawRoot !== cur) {
-        cur = m.rawRoot;
-        continue;
-      }
-      return cur;
-    }
-    const m = rawMetaById.get(id);
-    return m?.parentId || m?.rawRoot || id;
-  }
-
-  for (const [id, m] of rawMetaById.entries()) {
-    const rootId = resolveRootId(id);
-    let proj = m.proj;
-    if (proj.key === '__none__' && rootId !== id && rawMetaById.has(rootId)) {
-      proj = rawMetaById.get(rootId).proj;
-    }
-    if (!projectRegistry.has(proj.key)) {
-      projectRegistry.set(proj.key, {
-        key: proj.key,
-        path: proj.path,
-        isTemp: proj.isTemp,
-        votes: new Map()
-      });
-    }
-    const reg = projectRegistry.get(proj.key);
-    reg.votes.set(proj.rawBasename, (reg.votes.get(proj.rawBasename) || 0) + 1);
-    if (!reg.path && proj.path) reg.path = proj.path;
-
-    const fallbackTitle = m.isSubagent
-      ? `${m.agentName || 'subagent'} 子任务 (${id.slice(0, 8)})`
-      : `会话 ${id.slice(0, 8)}`;
-
-    resolvedMetaById.set(id, {
-      id,
-      title: m.title || fallbackTitle,
-      source: m.source,
-      agentName: m.agentName,
-      parentId: m.parentId || (m.isSubagent && rootId !== id ? rootId : ''),
-      rootId,
-      isSubagent: m.isSubagent,
-      projectKey: proj.key,
-      parsed: m.parsed
-    });
-  }
-
-  const projVotes = new Map([...projectRegistry.entries()].map(([k, v]) => [k, v.votes]));
-  const canonicalProjectNames = taChooseCanonicalProjectNames(projVotes);
-
-  const projects = [...projectRegistry.values()]
-    .map((p) => ({
-      key: p.key,
-      name: p.key === '__none__' ? '未绑定项目' : p.key === '__tmp__' ? '临时目录 (/tmp)' : canonicalProjectNames.get(p.key),
-      path: p.path,
-      isTemp: p.isTemp
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
-  const projNameByKey = new Map(projects.map((p) => [p.key, p.name]));
-
-  const factsMap = new Map();
-  const conversations = {};
-  const dailyMap = new Map();
-  let totalCalls = 0;
-
-  for (const meta of resolvedMetaById.values()) {
-    const windowCalls = cutoffSec > 0 ? meta.parsed.calls.filter((c) => c.ts >= cutoffSec) : meta.parsed.calls;
-    if (windowCalls.length === 0) continue;
-
-    let lastTs = 0;
-    const modelSet = new Set();
-
-    for (const c of windowCalls) {
-      totalCalls += 1;
-      if (c.ts > lastTs) lastTs = c.ts;
-      modelSet.add(c.model);
-
-      const callIsSubagent = meta.isSubagent || Boolean(c.subagentType);
-      const subagentType = callIsSubagent ? c.subagentType || meta.agentName || 'subagent' : '';
-      const scenario = taResolveCallScenario(c.baseScenario, callIsSubagent, meta.source);
-      const date = taToLocalDateString(c.ts || meta.parsed.mtimeSec);
-      const fKey = `${date}\x00${meta.id}\x00${c.model}\x00${c.pool}\x00${scenario}\x00${subagentType}`;
-      let fact = factsMap.get(fKey);
-      if (!fact) {
-        fact = {
-          date,
-          cid: meta.id,
-          model: c.model,
-          pool: c.pool,
-          scenario,
-          subagentType,
-          calls: 0,
-          inTok: 0,
-          cacheRead: 0,
-          outTok: 0,
-          thinkTok: 0,
-          respTok: 0,
-          total: 0,
-          weighted: 0,
-          billable: 0
-        };
-        factsMap.set(fKey, fact);
-      }
-      fact.calls += 1;
-      fact.inTok += c.inTok;
-      fact.cacheRead += c.cacheRead;
-      fact.outTok += c.outTok;
-      fact.thinkTok += c.thinkTok;
-      fact.respTok += c.respTok;
-      fact.total += c.total;
-      fact.weighted += c.weighted;
-      fact.billable += c.billable;
-
-      let dAcc = dailyMap.get(date);
-      if (!dAcc) {
-        dAcc = { date, calls: 0, inTok: 0, cacheRead: 0, outTok: 0, total: 0, weighted: 0, billable: 0 };
-        dailyMap.set(date, dAcc);
-      }
-      dAcc.calls += 1;
-      dAcc.inTok += c.inTok;
-      dAcc.cacheRead += c.cacheRead;
-      dAcc.outTok += c.outTok;
-      dAcc.total += c.total;
-      dAcc.weighted += c.weighted;
-      dAcc.billable += c.billable;
-    }
-
-    conversations[meta.id] = {
-      id: meta.id,
-      title: meta.title,
-      projectKey: meta.projectKey,
-      projectName: projNameByKey.get(meta.projectKey) || '未绑定项目',
-      source: meta.source,
-      isSubagent: meta.isSubagent,
-      agentName: meta.agentName,
-      parentId: meta.parentId,
-      rootId: meta.rootId,
-      lastTs,
-      models: [...modelSet]
-    };
-  }
-
-  const facts = [...factsMap.values()].sort((a, b) => {
-    if (b.date !== a.date) return b.date.localeCompare(a.date);
-    return b.weighted - a.weighted;
-  });
-  const dailySummary = [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date));
-
-  const usedProjectKeys = new Set(Object.values(conversations).map((c) => c.projectKey));
-  const activeProjects = projects.filter((p) => usedProjectKeys.has(p.key));
-
-  return {
-    version: 1,
-    generatedAt: new Date(nowSec * 1000).toISOString(),
-    nowSec,
-    defaultMetric: 'weighted',
-    elapsedMs: Number((performance.now() - t0).toFixed(2)),
-    stats: {
-      dbCount: dbEntries.length,
-      scannedDbs: parsedDbs.length,
-      failedDbs: failedDbs.length,
-      totalCalls,
-      conversationCount: Object.keys(conversations).length,
-      projectCount: activeProjects.length,
-      cacheHits,
-      cacheMisses
-    },
-    projects: activeProjects,
-    conversations,
-    facts,
-    dailySummary
-  };
-}
-
-function runTokenAnalyticsQuery(endpoint, opts = {}) {
-  const key = `${endpoint?.channel || 'default'}|${endpoint?.conversationsDir || ''}|${opts.maxDays || 365}`;
-  if (!opts.force && inFlightTokenAnalyticsPromise && inFlightTokenAnalyticsKey === key) {
-    return inFlightTokenAnalyticsPromise;
-  }
-  const run = (async () => {
-    if (inFlightTokenAnalyticsPromise) {
-      try {
-        await inFlightTokenAnalyticsPromise;
-      } catch {}
-    }
-    return queryTokenAnalytics(endpoint, opts);
-  })();
-  inFlightTokenAnalyticsKey = key;
-  inFlightTokenAnalyticsPromise = run;
-  run
-    .finally(() => {
-      if (inFlightTokenAnalyticsPromise === run) {
-        inFlightTokenAnalyticsPromise = null;
-        inFlightTokenAnalyticsKey = '';
-      }
-    })
-    .catch(() => {});
-  return run;
-}
-
-// ============================================================================
 // 5. CDP 目标发现、WebSocket 会话挂载与热更新推送
 // ============================================================================
-
-function belongsToParentTarget(entry, parentTargetId, parentChannel) {
-  let curId = entry.parentId || null;
-  if (!curId) {
-    return !parentChannel || entry.endpoint?.channel === parentChannel;
-  }
-  const seen = new Set();
-  while (curId && !seen.has(curId)) {
-    if (curId === parentTargetId) return true;
-    const known = attachedTargets.get(curId);
-    if (known && known.type === 'page') return false;
-    seen.add(curId);
-    curId = targetMetaMap.get(curId)?.parentId || null;
-  }
-  return !parentChannel || entry.endpoint?.channel === parentChannel;
-}
-
-function resolveParentThemeMode(target, endpoint) {
-  let curId = target?.parentId || null;
-  const seen = new Set();
-  while (curId && !seen.has(curId)) {
-    seen.add(curId);
-    if (targetThemeModes.has(curId)) {
-      return targetThemeModes.get(curId);
-    }
-    curId = targetMetaMap.get(curId)?.parentId || null;
-  }
-  const ch = endpoint?.channel || null;
-  for (const [id, entry] of attachedTargets.entries()) {
-    if (
-      entry.hostConfirmed &&
-      entry.type === 'page' &&
-      (!ch || entry.endpoint?.channel === ch) &&
-      targetThemeModes.has(id)
-    ) {
-      return targetThemeModes.get(id);
-    }
-  }
-  return null;
-}
-
-function syncThemeToChildIframes(parentTargetId, mode) {
-  if (!activeConfig.enabled || (mode !== 'dark' && mode !== 'light')) return;
-  const parentEntry = attachedTargets.get(parentTargetId);
-  const parentChannel = parentEntry?.endpoint?.channel || null;
-  for (const [, entry] of attachedTargets.entries()) {
-    if (!entry.hostConfirmed || entry.type !== 'iframe') continue;
-    if (!belongsToParentTarget(entry, parentTargetId, parentChannel)) continue;
-    entry
-      .send('Runtime.evaluate', {
-        expression: `window.__ag_set_host_theme_mode && window.__ag_set_host_theme_mode(${JSON.stringify(mode)})`,
-        returnByValue: false
-      })
-      .catch(() => {});
-    if (entry.updateNewDocScript) {
-      entry.updateNewDocScript().catch(() => {});
-    }
-  }
-}
-
-function resolveParentDarkPreset(target, endpoint) {
-  let curId = target?.parentId || null;
-  const seen = new Set();
-  while (curId && !seen.has(curId)) {
-    seen.add(curId);
-    if (targetDarkPresets.has(curId)) {
-      return targetDarkPresets.get(curId);
-    }
-    curId = targetMetaMap.get(curId)?.parentId || null;
-  }
-  const ch = endpoint?.channel || null;
-  for (const [id, entry] of attachedTargets.entries()) {
-    if (
-      entry.hostConfirmed &&
-      entry.type === 'page' &&
-      (!ch || entry.endpoint?.channel === ch) &&
-      targetDarkPresets.has(id)
-    ) {
-      return targetDarkPresets.get(id);
-    }
-  }
-  return null;
-}
-
-function syncDarkPresetToChildIframes(parentTargetId, rawDarkPreset) {
-  if (!activeConfig.enabled) return;
-  const nextDarkPreset = String(rawDarkPreset || '').trim().toLowerCase() === 'claude-warm' ? 'claude-warm' : 'onyx';
-  targetDarkPresets.set(parentTargetId, nextDarkPreset);
-  const parentEntry = attachedTargets.get(parentTargetId);
-  const parentChannel = parentEntry?.endpoint?.channel || null;
-  for (const [, entry] of attachedTargets.entries()) {
-    if (!entry.hostConfirmed || entry.type !== 'iframe') continue;
-    if (!belongsToParentTarget(entry, parentTargetId, parentChannel)) continue;
-    entry
-      .send('Runtime.evaluate', {
-        expression: `window.__ag_set_host_dark_preset && window.__ag_set_host_dark_preset(${JSON.stringify(nextDarkPreset)})`,
-        returnByValue: false
-      })
-      .catch(() => {});
-    if (entry.updateNewDocScript) {
-      entry.updateNewDocScript().catch(() => {});
-    }
-  }
-}
 
 function getTargetOriginKey(urlStr) {
   const raw = String(urlStr || '').trim();
@@ -4521,8 +2813,6 @@ function handleBrowserTargetDestroyed(rawTargetId) {
       entry.ws?.close();
     } catch {}
   }
-  targetThemeModes.delete(targetId);
-  targetDarkPresets.delete(targetId);
   targetMetaMap.delete(targetId);
   skippedNonHostTargets.delete(targetId);
 }
@@ -4736,8 +3026,6 @@ function attachTarget(target, endpoint) {
           if (attachedTargets.get(target.id)?.ws === ws) {
             attachedTargets.delete(target.id);
           }
-          targetThemeModes.delete(target.id);
-          targetDarkPresets.delete(target.id);
           targetMetaMap.delete(target.id);
           skippedNonHostTargets.delete(target.id);
           try {
@@ -4779,28 +3067,14 @@ function attachTarget(target, endpoint) {
       let lastNewDocSig = '';
 
       const buildTargetInjectScript = () => {
-        if (target.type !== 'iframe') {
-          return { script: cachedInjectScript, parentMode: '', parentDarkPreset: '' };
-        }
-        if (!activeConfig.enabled) {
-          return { script: cachedIframeInjectScript, parentMode: '', parentDarkPreset: '' };
-        }
-        const parentMode = resolveParentThemeMode(target, endpoint) || '';
-        const parentDarkPreset = resolveParentDarkPreset(target, endpoint) || '';
-        const modeVal = parentMode === 'dark' || parentMode === 'light' ? parentMode : null;
-        const darkVal = parentDarkPreset === 'claude-warm' || parentDarkPreset === 'onyx' ? parentDarkPreset : null;
-        return {
-          script: `window.__ag_host_theme_mode=${modeVal ? JSON.stringify(modeVal) : 'null'};\nwindow.__ag_host_dark_preset=${darkVal ? JSON.stringify(darkVal) : 'null'};\n${cachedIframeInjectScript}`,
-          parentMode: modeVal || '',
-          parentDarkPreset: darkVal || ''
-        };
+        return target.type === 'iframe' ? cachedIframeInjectScript : cachedInjectScript;
       };
 
       const updateNewDocScript = (force = false) => {
         newDocQueue = newDocQueue
           .then(async () => {
-            const { script, parentMode, parentDarkPreset } = buildTargetInjectScript();
-            const nextSig = `${activeConfig.enabled}|${cachedPatchVersion}|${parentMode}|${parentDarkPreset || ''}`;
+            const script = buildTargetInjectScript();
+            const nextSig = `${activeConfig.enabled}|${cachedPatchVersion}`;
             if (!force && evalScriptId && nextSig === lastNewDocSig) return;
             if (evalScriptId) {
               await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: evalScriptId });
@@ -4824,7 +3098,7 @@ function attachTarget(target, endpoint) {
         if (target.type === 'page') {
           hasExplicitSubscription = false;
         }
-        const { script } = buildTargetInjectScript();
+        const script = buildTargetInjectScript();
         const res = await send('Runtime.evaluate', {
           expression: script,
           returnByValue: true
@@ -4842,22 +3116,9 @@ function attachTarget(target, endpoint) {
           );
           return false;
         } else {
-          if (target.type === 'page') {
-            if (!activeConfig.enabled) {
-              targetThemeModes.delete(target.id);
-              targetDarkPresets.delete(target.id);
-              watchedCascadeIds = [];
-              perCascadeState.clear();
-            } else {
-              const resolvedMode = res?.result?.result?.value;
-              if (resolvedMode === 'dark' || resolvedMode === 'light') {
-                const prevMode = targetThemeModes.get(target.id);
-                targetThemeModes.set(target.id, resolvedMode);
-                if (prevMode !== resolvedMode) {
-                  syncThemeToChildIframes(target.id, resolvedMode);
-                }
-              }
-            }
+          if (target.type === 'page' && !activeConfig.enabled) {
+            watchedCascadeIds = [];
+            perCascadeState.clear();
           }
           console.log(`[Daemon] Injected (${cachedPatchVersion}) into target ${target.id} [${endpoint.channel}]`);
           return true;
@@ -5002,14 +3263,13 @@ function attachTarget(target, endpoint) {
           if (!isAllowedOrigin(currentTargetUrl)) {
             if (attachedTargets.get(target.id)?.ws === ws) {
               attachedTargets.delete(target.id);
-              targetThemeModes.delete(target.id);
-              targetDarkPresets.delete(target.id);
             }
             try {
               ws.close();
             } catch {}
             return;
           }
+          const requireStyle = target.type !== 'iframe' && Boolean(activeConfig.modules.metrics);
           if (isExemptInternalTarget({ type: target.type, url: currentTargetUrl })) {
             const checkRes = await send('Runtime.evaluate', {
               expression:
@@ -5017,63 +3277,25 @@ function attachTarget(target, endpoint) {
                 JSON.stringify(cachedPatchVersion) +
                 ' && (' +
                 JSON.stringify(!activeConfig.enabled) +
-                ' || (window.__ag_body_ready === true && !!document.getElementById("ag-custom-fonts"))), mode: ' +
-                JSON.stringify(target.type === 'iframe' ? 'iframe' : 'page') +
-                ' === "iframe" ? (window.__ag_host_theme_mode || null) : (window.__ag_resolved_theme_mode || null), darkPreset: ' +
-                JSON.stringify(target.type === 'iframe' ? 'iframe' : 'page') +
-                ' === "iframe" ? (window.__ag_host_dark_preset || window.__ag_runtime_dark_preset || (document.documentElement ? document.documentElement.getAttribute("data-ag-dark-preset") : null)) : (document.documentElement ? document.documentElement.getAttribute("data-ag-dark-preset") : null) })',
+                ' || (window.__ag_body_ready === true && (' +
+                JSON.stringify(!requireStyle) +
+                ' || !!document.getElementById("ag-custom-fonts")))) })',
               returnByValue: true
             });
             const checkVal = checkRes?.result?.result?.value;
             if (!checkVal || checkVal.ok !== true) {
               await inject();
               await syncMetricsForSession(true);
-            } else if (activeConfig.enabled && target.type === 'page') {
-              if (checkVal.mode === 'dark' || checkVal.mode === 'light') {
-                const prevMode = targetThemeModes.get(target.id);
-                targetThemeModes.set(target.id, checkVal.mode);
-                if (prevMode !== checkVal.mode) {
-                  syncThemeToChildIframes(target.id, checkVal.mode);
-                }
-              }
-              if (checkVal.darkPreset === 'claude-warm' || checkVal.darkPreset === 'onyx') {
-                const prevDarkPreset = targetDarkPresets.get(target.id);
-                targetDarkPresets.set(target.id, checkVal.darkPreset);
-                if (prevDarkPreset !== checkVal.darkPreset) {
-                  syncDarkPresetToChildIframes(target.id, checkVal.darkPreset);
-                }
-              }
-            } else if (activeConfig.enabled && target.type === 'iframe') {
-              const parentMode = resolveParentThemeMode(target, endpoint);
-              const parentDarkPreset = resolveParentDarkPreset(target, endpoint);
-              let needNewDocUpdate = !evalScriptId;
-              if (parentMode && checkVal.mode !== parentMode) {
-                await send('Runtime.evaluate', {
-                  expression: `window.__ag_set_host_theme_mode && window.__ag_set_host_theme_mode(${JSON.stringify(parentMode)})`,
-                  returnByValue: false
-                });
-                needNewDocUpdate = true;
-              }
-              if (parentDarkPreset && checkVal.darkPreset !== parentDarkPreset) {
-                await send('Runtime.evaluate', {
-                  expression: `window.__ag_set_host_dark_preset && window.__ag_set_host_dark_preset(${JSON.stringify(parentDarkPreset)})`,
-                  returnByValue: false
-                });
-                needNewDocUpdate = true;
-              }
-              if (needNewDocUpdate) {
-                await updateNewDocScript();
-              }
+            } else if (activeConfig.enabled && !evalScriptId) {
+              await updateNewDocScript();
             }
             return;
           }
           const checkRes = await send('Runtime.evaluate', {
             expression: `({
-              injected: window.__ag_patch_version === ${JSON.stringify(cachedPatchVersion)} && (${JSON.stringify(!activeConfig.enabled)} || (window.__ag_body_ready === true && !!document.getElementById("ag-custom-fonts"))),
+              injected: window.__ag_patch_version === ${JSON.stringify(cachedPatchVersion)} && (${JSON.stringify(!activeConfig.enabled)} || (window.__ag_body_ready === true && (${JSON.stringify(!requireStyle)} || !!document.getElementById("ag-custom-fonts")))),
               skipNonHost: window.__ag_skip_non_host === true,
-              kind: ${HOST_PROBE_EXPRESSION},
-              mode: window.__ag_resolved_theme_mode || null,
-              darkPreset: document.documentElement ? document.documentElement.getAttribute("data-ag-dark-preset") : null
+              kind: ${HOST_PROBE_EXPRESSION}
             })`,
             returnByValue: true
           });
@@ -5089,24 +3311,8 @@ function attachTarget(target, endpoint) {
           if (state.injected !== true) {
             await inject();
             await syncMetricsForSession(true);
-          } else if (activeConfig.enabled && target.type === 'page') {
-            if (!evalScriptId) {
-              await updateNewDocScript();
-            }
-            if (state.mode === 'dark' || state.mode === 'light') {
-              const prevMode = targetThemeModes.get(target.id);
-              targetThemeModes.set(target.id, state.mode);
-              if (prevMode !== state.mode) {
-                syncThemeToChildIframes(target.id, state.mode);
-              }
-            }
-            if (state.darkPreset === 'claude-warm' || state.darkPreset === 'onyx') {
-              const prevDarkPreset = targetDarkPresets.get(target.id);
-              targetDarkPresets.set(target.id, state.darkPreset);
-              if (prevDarkPreset !== state.darkPreset) {
-                syncDarkPresetToChildIframes(target.id, state.darkPreset);
-              }
-            }
+          } else if (activeConfig.enabled && target.type === 'page' && !evalScriptId) {
+            await updateNewDocScript();
           }
         } catch {}
       };
@@ -5125,7 +3331,6 @@ function attachTarget(target, endpoint) {
       let bindingsAdded = false;
       let initialAttachDone = false;
       let navDebounceTimer = null;
-      let lastHardReloadAt = 0;
 
       const clearPendingTimer = () => {
         if (pendingRetryTimer) {
@@ -5175,8 +3380,6 @@ function attachTarget(target, endpoint) {
         }
         if (attachedTargets.get(target.id)?.ws === ws) {
           attachedTargets.delete(target.id);
-          targetThemeModes.delete(target.id);
-          targetDarkPresets.delete(target.id);
         }
         clearTimeout(attachTimeout);
         try {
@@ -5212,10 +3415,6 @@ function attachTarget(target, endpoint) {
           bindingsAdded = true;
           if (target.type === 'page') {
             await send('Runtime.addBinding', { name: '__agRequestMetrics' });
-            await send('Runtime.addBinding', { name: '__agRequestHardReload' });
-            await send('Runtime.addBinding', { name: '__agSetDarkPreset' });
-            await send('Runtime.addBinding', { name: '__agSyncHostThemeMode' });
-            await send('Runtime.addBinding', { name: '__agRequestTokenAnalytics' });
           }
         }
         if (ws.readyState !== WebSocket.OPEN || nonHostSettled) {
@@ -5241,8 +3440,6 @@ function attachTarget(target, endpoint) {
           pendingProbe = false;
           if (attachedTargets.get(target.id)?.ws === ws) {
             attachedTargets.delete(target.id);
-            targetThemeModes.delete(target.id);
-            targetDarkPresets.delete(target.id);
           }
           clearTimeout(attachTimeout);
           try {
@@ -5272,8 +3469,6 @@ function attachTarget(target, endpoint) {
             clearPendingTimer();
             if (attachedTargets.get(target.id)?.ws === ws) {
               attachedTargets.delete(target.id);
-              targetThemeModes.delete(target.id);
-              targetDarkPresets.delete(target.id);
             }
             clearTimeout(attachTimeout);
             try {
@@ -5380,96 +3575,6 @@ function attachTarget(target, endpoint) {
             }
             return;
           }
-          if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agSyncHostThemeMode') {
-            if (hostConfirmed && target.type === 'page' && activeConfig.enabled) {
-              const mode = String(msg.params.payload || '').trim();
-              if (mode === 'dark' || mode === 'light') {
-                const prevMode = targetThemeModes.get(target.id);
-                targetThemeModes.set(target.id, mode);
-                if (prevMode !== mode) {
-                  syncThemeToChildIframes(target.id, mode);
-                }
-              }
-            }
-            return;
-          }
-          if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agRequestHardReload') {
-            if (
-              !hostConfirmed ||
-              target.type !== 'page' ||
-              !activeConfig.enabled ||
-              activeConfig.modules.deadlockHealer === false ||
-              activeConfig.modules.coldBootHealer === false
-            ) {
-              return;
-            }
-            const now = Date.now();
-            if (now - lastHardReloadAt < 60000) return;
-            lastHardReloadAt = now;
-            const reason = String(msg.params.payload || 'coldboot-drift').slice(0, 80);
-            console.log(
-              `[Daemon] Cold-boot embedded UI drift detected on target ${target.id} (${reason}), triggering ignoreCache reload`
-            );
-            send('Page.reload', { ignoreCache: true });
-            return;
-          }
-          if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agSetDarkPreset') {
-            if (!hostConfirmed || target.type !== 'page' || !activeConfig.enabled) {
-              return;
-            }
-            syncDarkPresetToChildIframes(target.id, msg.params.payload);
-            if (!SAFE_MODE) {
-              persistDarkPresetToUserConfig(msg.params.payload);
-            }
-            return;
-          }
-          if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agRequestTokenAnalytics') {
-            if (
-              !hostConfirmed ||
-              target.type !== 'page' ||
-              !activeConfig.enabled ||
-              !activeConfig.modules.tokenAnalytics ||
-              !DatabaseSync
-            ) {
-              return;
-            }
-            let req = {};
-            try {
-              req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
-            } catch {}
-            const reqId = String(req?.reqId || '');
-            const maxDays = Number(req?.maxDays) > 0 ? Number(req.maxDays) : 365;
-            const force = req?.force === 'hard' ? 'hard' : Boolean(req?.force);
-            void (async () => {
-              let payloadJson = '';
-              try {
-                const data = await runTokenAnalyticsQuery(endpoint, { maxDays, force });
-                if (tokenAnalyticsLastJsonCache.dataRef === data && tokenAnalyticsLastJsonCache.jsonStr) {
-                  payloadJson = tokenAnalyticsLastJsonCache.jsonStr;
-                } else {
-                  payloadJson = JSON.stringify({ ok: true, data });
-                  tokenAnalyticsLastJsonCache = { dataRef: data, jsonStr: payloadJson };
-                }
-              } catch (err) {
-                payloadJson = JSON.stringify({
-                  ok: false,
-                  error: err?.message || String(err || 'token analytics failed')
-                });
-              }
-              if (ws.readyState === WebSocket.OPEN) {
-                const safeJsonLiteral = JSON.stringify(payloadJson)
-                  .replace(/\u2028/g, '\\u2028')
-                  .replace(/\u2029/g, '\\u2029');
-                try {
-                  await send('Runtime.evaluate', {
-                    expression: `if (typeof window.__ag_on_token_analytics === 'function') { window.__ag_on_token_analytics(${JSON.stringify(reqId)}, JSON.parse(${safeJsonLiteral})); }`,
-                    returnByValue: false
-                  });
-                } catch {}
-              }
-            })();
-            return;
-          }
           if (
             msg.method === 'Page.frameNavigated' &&
             (!msg.params?.frame?.parentId || msg.params.frame.id === target.id) &&
@@ -5511,8 +3616,6 @@ function attachTarget(target, endpoint) {
         pendingCallbacks.clear();
         if (attachedTargets.get(target.id)?.ws === ws) {
           attachedTargets.delete(target.id);
-          targetThemeModes.delete(target.id);
-          targetDarkPresets.delete(target.id);
         }
         finishAttach(false);
       };
@@ -6354,24 +4457,11 @@ async function sync() {
     }
     if (syncTickCount % 24 === 1) {
       trimPosixDaemonLogsIfNeeded();
-      if (
-        !inFlightTokenAnalyticsPromise &&
-        !tokenAnalyticsPersistTimer &&
-        (tokenAnalyticsDbCache.size > 0 || tokenAnalyticsSummariesCache.size > 0 || wslSqliteStagingCache.size > 0) &&
-        Date.now() - lastTokenAnalyticsAccessMs > 600000
-      ) {
-        tokenAnalyticsDbCache.clear();
-        tokenAnalyticsSummariesCache.clear();
-        tokenAnalyticsDiskLoaded = false;
-        tokenAnalyticsLastJsonCache = { dataRef: null, jsonStr: '' };
+      if (attachedTargets.size === 0 && wslSqliteStagingCache.size > 0) {
         cleanupWslSqliteStagingCache();
       }
     }
     const bundleChanged = rebuildBundleIfNeeded();
-    if (!activeConfig.enabled) {
-      targetThemeModes.clear();
-      targetDarkPresets.clear();
-    }
     if (!isEventDiscoveryEnabled()) {
       closeAllBrowserWatchers();
     }
@@ -6539,8 +4629,6 @@ async function sync() {
           entry.ws.close();
         } catch {}
         attachedTargets.delete(id);
-        targetThemeModes.delete(id);
-        targetDarkPresets.delete(id);
       }
     }
     if (fullScannedChannels.size > 0) {

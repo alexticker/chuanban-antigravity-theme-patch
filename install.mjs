@@ -3,9 +3,8 @@
  * chuanban-antigravity-theme-patch · 一键安装、自检、CDP 接力重启、安全模式验证、打包与回滚 CLI (install.mjs)
  *
  * 支持子命令：
- *   node install.mjs install  [--channel auto|stable|insiders] [--preset high-contrast|claude-desktop-purewhite|vintage-deep] [--dark-preset onyx|claude-warm] [--sync-user] [--with-launcher] [--target-dir <dir>]
+ *   node install.mjs install  [--channel auto|stable|insiders] [--sync-user] [--with-launcher] [--target-dir <dir>]
  *   node install.mjs relaunch [--channel auto|stable|insiders] [--force] [--target-dir <dir>]
- *   node install.mjs install-fonts --from <font-folder-path>
  *   node install.mjs doctor   [--channel auto|stable|insiders] [--target-dir <dir>]
  *   node install.mjs verify   [--safe-mode] [--channel auto|stable|insiders] [--target-dir <dir>]
  *   node install.mjs rollback [--target-dir <dir>]
@@ -117,7 +116,7 @@ function buildManifest(baseDir = __dirname) {
   }
   const manifest = {
     name: 'chuanban-antigravity-theme-patch',
-    version: '5.5.5',
+    version: '5.5.5-i18n-metrics-only',
     minNodeVersion: '22.0.0',
     fullMetricsNodeVersion: '22.13.0',
     distribution: {
@@ -915,11 +914,6 @@ async function inspectLiveWindow(portFileOrEnv, fallbackPort = 9222) {
                   bodyReady: window.__ag_body_ready === true,
                   hasStyle: !!document.getElementById('ag-custom-fonts'),
                   hasUserStyle: !!document.getElementById('antigravity-user-custom-style'),
-                  preset: document.documentElement ? document.documentElement.getAttribute('data-ag-preset') : null,
-                  darkPreset: document.documentElement ? document.documentElement.getAttribute('data-ag-dark-preset') : null,
-                  themeMode: document.documentElement ? document.documentElement.getAttribute('data-ag-theme-mode') : null,
-                  pageType: document.documentElement ? document.documentElement.getAttribute('data-ag-page-type') : null,
-                  waxSeal: document.documentElement ? document.documentElement.getAttribute('data-ag-wax-seal') : null,
                   dictCount: window.__ag_i18n_dict ? Object.keys(window.__ag_i18n_dict).length : 0,
                   protoSafe: window.__ag_i18n_dict ? Object.getPrototypeOf(window.__ag_i18n_dict) === null : false,
                   pillMounted: pills.length > 0,
@@ -964,7 +958,7 @@ async function inspectLiveWindow(portFileOrEnv, fallbackPort = 9222) {
     const cleanState = { ...rawState };
     delete cleanState.__isHost;
     if (isHost) {
-      if (cleanState.hasStyle === true) {
+      if (cleanState.bodyReady === true && (cleanState.hasStyle === true || (cleanState.dictCount || 0) > 0)) {
         selected = { page: candidate, state: cleanState };
         break;
       }
@@ -1390,21 +1384,6 @@ async function runDoctor() {
   const cdpMissingFlag = !isCustomSandboxTarget && !live.reachable && env.cdpStatus === 'missing_opt_in_flag';
   const remediation = cdpMissingFlag ? `node ${JSON.stringify(path.join(targetDir, 'install.mjs'))} relaunch` : null;
 
-  const missingFonts = [];
-  if (!env.hasAnthropicSerifFont) missingFonts.push('Anthropic Serif (AnthropicSerif-Regular.ttf, AnthropicSerif-Bold.ttf)');
-  if (!env.hasAnthropicMonoFont) missingFonts.push('Anthropic Mono (AnthropicMono-Regular.ttf)');
-  if (!env.hasSarasaFont) {
-    missingFonts.push(
-      process.platform === 'win32'
-        ? 'Sarasa Gothic (Windows 推荐拆分版 SarasaUiSC-TTF + SarasaMonoSlabSC-TTF，避免 791MB SuperTTC 卡顿)'
-        : 'Sarasa Gothic (Sarasa-SuperTTC.ttc)'
-    );
-  }
-  const allRequiredFontsInstalled = missingFonts.length === 0;
-  const superTtcWarning =
-    process.platform === 'win32' && env.hasSarasaSuperTtc
-      ? 'Detected monolithic 791MB Sarasa-SuperTTC.ttc active on Windows; DirectWrite/Chromium may stall 1.5–10.5s on initial weight instantiation and consume >2GB renderer virtual memory. Recommended: download Windows-Sarasa-Split-SC-TTF-v1.0.43.zip (https://drive.google.com/file/d/1iVVvZXtwUcDiHy42tJ25X6N-JlOf3l7A/view?usp=sharing) and run `node install.mjs install-fonts --from <dir> --retire-super-ttc`.'
-      : null;
   const launcherMode =
     process.platform === 'darwin'
       ? env.launcherInstalled
@@ -1416,6 +1395,7 @@ async function runDoctor() {
 
   const report = {
     ok: Boolean(env.nodeBasicOk && integrity.ok && !cdpMissingFlag),
+    mode: 'i18n-metrics-only',
     node: {
       version: env.nodeVer,
       execPath: process.execPath,
@@ -1423,18 +1403,9 @@ async function runDoctor() {
       tier: env.tier
     },
     fonts: {
-      uiLatinEngine: 'Google Sans Flex (native variable font)',
-      allRequiredInstalled: allRequiredFontsInstalled,
-      anthropicInstalled: env.hasAnthropicFont,
-      anthropicSerifInstalled: env.hasAnthropicSerifFont,
-      anthropicMonoInstalled: env.hasAnthropicMonoFont,
-      sarasaInstalled: env.hasSarasaFont,
-      sarasaSplitScInstalled: env.hasSarasaSplitScTtf,
-      superTtcActive: env.hasSarasaSuperTtc,
-      orphanSuperTtcPendingReboot: env.orphanSuperTtcPendingReboot,
-      superTtcWarning,
-      missing: missingFonts,
-      downloadUrl: !allRequiredFontsInstalled ? GOOGLE_DRIVE_URL : null
+      required: false,
+      allRequiredInstalled: true,
+      note: '精简分支仅保留界面汉化 (i18n) 与实时会话指标胶囊 (metrics)，无需安装任何第三方字体。'
     },
     antigravity: {
       channel: env.channel,
@@ -2088,8 +2059,6 @@ WantedBy=default.target
 async function runInstall() {
   const cliChannel = getArg('--channel', null);
   const channel = cliChannel || 'auto';
-  const preset = getArg('--preset', null);
-  const darkPreset = getArg('--dark-preset', null);
   const syncUser = hasFlag('--sync-user');
   const defaultTarget = resolveGlobalInstallDir();
   const targetDir = path.resolve(getArg('--target-dir', defaultTarget));
@@ -2187,30 +2156,10 @@ async function runInstall() {
   } else if (!currentCfg.channel) {
     currentCfg.channel = 'auto';
   }
-  if (preset) {
-    currentCfg.preset = preset;
-  } else if (!currentCfg.preset) {
-    currentCfg.preset = 'high-contrast';
-  }
-  if (darkPreset) {
-    currentCfg.darkPreset = darkPreset;
-  } else if (!currentCfg.darkPreset) {
-    currentCfg.darkPreset = 'onyx';
-  }
   if (!currentCfg.modules || typeof currentCfg.modules !== 'object' || Array.isArray(currentCfg.modules)) {
     currentCfg.modules = {};
   }
-  for (const modKey of [
-    'i18n',
-    'metrics',
-    'composerWaxSeal',
-    'deadlockHealer',
-    'coldBootHealer',
-    'zoomShortcuts',
-    'cdpAutoRelaunch',
-    'customCss',
-    'customJs'
-  ]) {
+  for (const modKey of ['i18n', 'metrics', 'cdpAutoRelaunch', 'customCss', 'customJs']) {
     if (typeof currentCfg.modules[modKey] !== 'boolean') {
       currentCfg.modules[modKey] = true;
     }
@@ -2480,17 +2429,17 @@ async function runRelaunch() {
       });
     }
     live = await inspectLiveWindow(curEnv);
-    if (live.reachable && live.state?.hasStyle) break;
+    if (live.reachable && live.state?.bodyReady && (live.state?.hasStyle || (live.state?.dictCount || 0) > 0)) break;
   }
 
-  const ok = Boolean(live.reachable && live.state?.hasStyle);
+  const ok = Boolean(live.reachable && live.state?.bodyReady && (live.state?.hasStyle || (live.state?.dictCount || 0) > 0));
   console.log(
     JSON.stringify(
       {
         ok,
         stoppedPids: procsToStop.map((p) => p.pid),
         version: live.state?.version || null,
-        themeStyle: Boolean(live.state?.hasStyle),
+        metricsStyle: Boolean(live.state?.hasStyle),
         dictCount: live.state?.dictCount || 0,
         pillMounted: Boolean(live.state?.pillMounted),
         live
@@ -2515,13 +2464,18 @@ async function runVerify() {
   spawnSync(process.execPath, daemonArgs, { stdio: 'inherit' });
   const env = await detectEnvironment(channel);
   const live = await inspectLiveWindow(env);
-  const ok = Boolean(live.reachable && (live.state?.hasStyle || live.pages === 0));
+  const ok = Boolean(
+    live.reachable &&
+      (live.pages === 0 || (live.state?.bodyReady && (live.state?.hasStyle || (live.state?.dictCount || 0) > 0)))
+  );
   console.log(
     JSON.stringify(
       {
         ok,
         version: live.state?.version || null,
-        themeStyle: Boolean(live.state?.hasStyle),
+        metricsStyle: Boolean(live.state?.hasStyle),
+        dictCount: live.state?.dictCount || 0,
+        pillMounted: Boolean(live.state?.pillMounted),
         safeMode,
         channel,
         live
@@ -3049,10 +3003,8 @@ switch (subcommand) {
     break;
   default:
     console.log(`Usage:
-  node install.mjs install          [--channel auto|stable|insiders] [--preset high-contrast|claude-desktop-purewhite|vintage-deep] [--dark-preset onyx|claude-warm] [--sync-user] [--with-launcher]
+  node install.mjs install          [--channel auto|stable|insiders] [--sync-user] [--with-launcher]
   node install.mjs relaunch         [--channel auto|stable|insiders] [--force]
-  node install.mjs install-fonts    --from <font-folder-path> [--retire-super-ttc]
-  node install.mjs retire-super-ttc [--force]
   node install.mjs doctor           [--channel auto|stable|insiders]
   node install.mjs verify           [--safe-mode] [--channel auto|stable|insiders]
   node install.mjs rollback
