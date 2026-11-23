@@ -1,5 +1,7 @@
 /* ============================================================================
- * 实时指标胶囊与悬浮详情卡样式（仅保留指标胶囊 UI，不修改 Antigravity 原生主题与字体）
+ * 实时指标胶囊与悬浮详情卡样式
+ * 全面复用 Antigravity 原生 CSS 变量（--foreground / --muted-foreground / --popover / --card / --border / --primary / --font-sans / --font-mono），
+ * 自动适配原生浅色、深色及任意内置主题，不修改 Antigravity 原生主题与字体。
  * ============================================================================ */
 :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) div[data-ag-row-mode] > div:first-child {
   overflow: hidden !important;
@@ -25,14 +27,14 @@
   height: 22px;
   margin-left: 2px;
   margin-right: 0;
-  padding: 0 2px 0 5px;
-  border-left: 1px solid rgba(0, 0, 0, 0.22);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace) !important;
+  padding: 0 2px 0 6px;
+  border-left: 1px solid var(--border, rgba(128, 128, 128, 0.24));
+  font-family: var(--font-sans, system-ui, -apple-system, BlinkMacSystemFont, sans-serif) !important;
   font-variant-numeric: tabular-nums;
-  font-size: 10.5px !important;
-  font-weight: 500 !important;
-  letter-spacing: -0.025em !important;
-  color: #262422 !important;
+  font-size: 11px !important;
+  font-weight: 450 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--muted-foreground, rgba(0, 0, 0, 0.62)) !important;
   opacity: 0.92 !important;
   line-height: 1 !important;
   white-space: nowrap;
@@ -40,6 +42,7 @@
   text-overflow: ellipsis;
   user-select: none;
   cursor: default;
+  transition: color 120ms ease, opacity 120ms ease;
 }
 
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill):first-child {
@@ -51,7 +54,7 @@
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill):hover,
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill):hover :is(#ag-live-metrics-text, .ag-live-metrics-text) {
   opacity: 1 !important;
-  color: #0A0A0A !important;
+  color: var(--foreground, currentColor) !important;
 }
 
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill)[data-ag-row-mode="bottom"] {
@@ -66,7 +69,7 @@
   margin: 2px 4px 1px 4px !important;
   padding: 2px 4px 0 6px !important;
   border-left: none !important;
-  border-top: 1px dashed rgba(0, 0, 0, 0.14) !important;
+  border-top: 1px dashed var(--border, rgba(128, 128, 128, 0.22)) !important;
 }
 
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill) :is(#ag-live-metrics-text, .ag-live-metrics-text) {
@@ -78,16 +81,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace) !important;
-  font-size: 10.5px !important;
-  font-weight: 500 !important;
-  letter-spacing: -0.025em !important;
+  font-family: inherit !important;
+  font-variant-numeric: tabular-nums;
+  font-size: inherit !important;
+  font-weight: inherit !important;
+  letter-spacing: inherit !important;
   color: inherit !important;
 }
 
 :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-sep,
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-sep {
-  margin: 0 2px;
+  margin: 0 3px;
   opacity: 0.45 !important;
 }
 
@@ -100,7 +104,7 @@
 :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-crit,
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-crit {
   color: #DC2626 !important;
-  font-weight: 700 !important;
+  font-weight: 650 !important;
 }
 
 :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-sub-badge,
@@ -108,14 +112,14 @@
   display: inline-flex;
   align-items: center;
   height: 15px;
-  padding: 0 4px;
+  padding: 0 5px;
   border-radius: 4px;
-  font-size: 9.5px !important;
-  font-weight: 600 !important;
+  font-size: 10px !important;
+  font-weight: 550 !important;
   line-height: 1;
-  background-color: rgba(217, 119, 87, 0.12);
-  border: 1px solid rgba(217, 119, 87, 0.28);
-  color: #9E3E22 !important;
+  background-color: color-mix(in srgb, var(--primary, #2563EB) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary, #2563EB) 24%, transparent);
+  color: var(--primary, #2563EB) !important;
 }
 
 :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-zh-warn-dot,
@@ -125,23 +129,11 @@
   line-height: 1;
 }
 
-/* 黑夜模式指标胶囊配色与高可见预警色（自动跟随原生深色类名） */
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) {
-  color: #C8CAD4 !important;
-  border-left-color: rgba(255, 255, 255, 0.18) !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill):hover,
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill):hover :is(#ag-live-metrics-text, .ag-live-metrics-text) {
-  color: #FFFFFF !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill)[data-ag-row-mode="bottom"] {
-  border-top-color: rgba(255, 255, 255, 0.14) !important;
-}
-
+/* 深色模式语义预警色与阴影增强（文本/背景/边框已由原生变量自动切换） */
 :is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-warn,
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-warn {
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-warn,
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-zh-warn-dot,
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-zh-warn-dot {
   color: #FBBF24 !important;
 }
 
@@ -152,14 +144,9 @@
 
 :is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-sub-badge,
 :is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-sub-badge {
-  background-color: rgba(47, 113, 227, 0.18);
-  border-color: rgba(96, 165, 250, 0.36);
-  color: #93C5FD !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"]) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-zh-warn-dot,
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-zh-warn-dot {
-  color: #FBBF24 !important;
+  background-color: color-mix(in srgb, var(--primary, #60A5FA) 16%, transparent);
+  border-color: color-mix(in srgb, var(--primary, #60A5FA) 32%, transparent);
+  color: var(--primary, #93C5FD) !important;
 }
 
 #ag-live-metrics-tooltip {
@@ -169,14 +156,14 @@
   max-width: 450px;
   padding: 10px 12px;
   border-radius: 8px;
-  background-color: var(--card, #FFFFFF) !important;
-  border: 1px solid var(--border, rgba(0, 0, 0, 0.18)) !important;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace) !important;
+  background-color: var(--popover, var(--card, #FFFFFF)) !important;
+  border: 1px solid var(--border, var(--card-border, rgba(128, 128, 128, 0.24))) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
+  font-family: var(--font-sans, system-ui, -apple-system, BlinkMacSystemFont, sans-serif) !important;
   font-variant-numeric: tabular-nums;
-  font-size: 11px !important;
+  font-size: 11.5px !important;
   line-height: 1.55 !important;
-  color: var(--foreground, #1F1E1D) !important;
+  color: var(--popover-foreground, var(--foreground, #1F1E1D)) !important;
   text-align: left;
   white-space: normal;
   opacity: 0;
@@ -184,6 +171,13 @@
   pointer-events: none;
   transform: translateY(4px);
   transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip {
+  background-color: var(--popover, var(--card, #18181E)) !important;
+  border-color: var(--border, rgba(255, 255, 255, 0.14)) !important;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35) !important;
+  color: var(--popover-foreground, var(--foreground, #EAEBF1)) !important;
 }
 
 #ag-live-metrics-tooltip[data-visible="1"] {
@@ -201,9 +195,9 @@
   justify-content: space-between;
   align-items: center;
   font-weight: 600 !important;
-  font-size: 11px !important;
-  color: #0A0A0A !important;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.14);
+  font-size: 11.5px !important;
+  color: var(--popover-foreground, var(--foreground, currentColor)) !important;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
   padding-bottom: 4px;
   margin-bottom: 6px;
 }
@@ -221,12 +215,13 @@
 }
 
 #ag-live-metrics-tooltip .ag-tt-lbl {
-  color: #57534E !important;
+  color: var(--muted-foreground, rgba(128, 128, 128, 0.85)) !important;
   flex-shrink: 0;
 }
 
 #ag-live-metrics-tooltip .ag-tt-val {
-  color: #0A0A0A !important;
+  color: var(--popover-foreground, var(--foreground, currentColor)) !important;
+  font-variant-numeric: tabular-nums;
   font-weight: 500 !important;
   text-align: right;
 }
@@ -256,7 +251,7 @@
 }
 
 #ag-live-metrics-tooltip .ag-tt-warn-val {
-  color: #57534E !important;
+  color: var(--muted-foreground, rgba(128, 128, 128, 0.9)) !important;
   font-family: var(--font-sans, system-ui, -apple-system, BlinkMacSystemFont, sans-serif) !important;
   font-size: 10.5px !important;
   line-height: 1.45 !important;
@@ -273,8 +268,8 @@
   margin-top: 2px;
   padding: 4px 6px;
   border-radius: 4px;
-  background-color: rgba(0, 0, 0, 0.05);
-  border: 1px solid rgba(0, 0, 0, 0.10);
+  background-color: color-mix(in srgb, var(--foreground, #000000) 5%, transparent);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.18));
 }
 
 #ag-live-metrics-tooltip .ag-tt-warn-cmd {
@@ -283,7 +278,7 @@
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace) !important;
   font-size: 10px !important;
   line-height: 1.4 !important;
-  color: #1F1E1D !important;
+  color: var(--popover-foreground, var(--foreground, currentColor)) !important;
   white-space: normal !important;
   word-break: break-all;
   user-select: text !important;
@@ -298,7 +293,7 @@
   font-weight: 500 !important;
   line-height: 1.4 !important;
   cursor: pointer !important;
-  background-color: #FFFFFF !important;
+  background-color: var(--background, var(--card, #FFFFFF)) !important;
   color: #92400E !important;
   border: 1px solid rgba(180, 83, 9, 0.32) !important;
   transition: background-color 120ms ease, border-color 120ms ease !important;
@@ -309,27 +304,6 @@
   border-color: rgba(180, 83, 9, 0.5) !important;
 }
 
-/* 黑夜模式悬浮指标详情卡配色 */
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip {
-  background-color: var(--card, #18181E) !important;
-  border-color: rgba(255, 255, 255, 0.14) !important;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.65), 0 2px 8px rgba(0, 0, 0, 0.4) !important;
-  color: #EAEBF1 !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-hdr {
-  color: #FFFFFF !important;
-  border-bottom-color: rgba(255, 255, 255, 0.12) !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-lbl {
-  color: #9EA0AC !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-val {
-  color: #FFFFFF !important;
-}
-
 :is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-warn {
   background-color: rgba(251, 191, 36, 0.1);
   border-color: rgba(251, 191, 36, 0.28);
@@ -337,19 +311,6 @@
 
 :is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-warn-lbl {
   color: #FCD34D !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-warn-val {
-  color: #C8CAD4 !important;
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-warn-cmd-row {
-  background-color: rgba(0, 0, 0, 0.32);
-  border-color: rgba(255, 255, 255, 0.12);
-}
-
-:is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-warn-cmd {
-  color: #EAEBF1 !important;
 }
 
 :is(html[data-theme="dark"] body, body.dark, body.theme-dark, body.dark-theme) #ag-live-metrics-tooltip .ag-tt-copy-btn {
