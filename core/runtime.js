@@ -264,6 +264,13 @@
     } catch (e) {}
     window.__ag_metrics_tt_hide_timer = null;
   }
+  if (window.__ag_metrics_tt_show_timer) {
+    try {
+      clearTimeout(window.__ag_metrics_tt_show_timer);
+    } catch (e) {}
+    window.__ag_metrics_tt_show_timer = null;
+  }
+  window.__ag_metrics_tt_intent_pill = null;
 
   // 全局持久化的原始英文文本映射表（支持 i18n.override.json 热重载增删改与一键还原）
   if (!window.__ag_orig_text_map) {
@@ -501,6 +508,12 @@
     window.__ag_metrics_cache_ver = PATCH_VERSION;
   }
   const metricsById = window.__ag_metrics_by_id;
+  const pendingRunUntilByCid = Object.create(null);
+  let lastMetricsReqAt = 0;
+  let metricsDomCheckRafId = 0;
+  let metricsDomObserverStarted = false;
+  const PENDING_RING_SVG =
+    '<svg class="ag-ctx-ring ag-ctx-ok" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><circle class="ag-ctx-ring-track" cx="8" cy="8" r="5.8" fill="none" stroke-width="2.1"/><circle class="ag-ctx-ring-fill" cx="8" cy="8" r="5.8" fill="none" stroke-width="2.1" stroke-linecap="round" stroke-dasharray="36.44" stroke-dashoffset="32.80" transform="rotate(-90 8 8)"/></svg>';
 
   window.__ag_cleanup_fns.push(() => {
     for (const ro of activeMetricsObservers) {
@@ -517,6 +530,8 @@
     activeMetricsRafs.clear();
     pillLayoutRafId = 0;
     routeCheckRafId = 0;
+    metricsDomCheckRafId = 0;
+    metricsDomObserverStarted = false;
     pendingPillLayoutBoxes.clear();
     for (const tid of metricsRouteTimers) {
       try {
@@ -647,9 +662,14 @@
         }
         return '';
       }
-      const view =
-        box.closest && box.closest('[data-testid="conversation-view"][data-cascade-id], [data-cascade-id]');
-      if (view) {
+      const convView =
+        box.closest && box.closest('[data-testid="conversation-view"][data-cascade-id]');
+      if (convView) {
+        const cid = String(convView.getAttribute('data-cascade-id') || '').trim().toLowerCase();
+        if (CASCADE_UUID_RE.test(cid)) return cid;
+      }
+      const view = box.closest && box.closest('[data-cascade-id]');
+      if (view && view !== convView) {
         const cid = String(view.getAttribute('data-cascade-id') || '').trim().toLowerCase();
         if (CASCADE_UUID_RE.test(cid)) return cid;
       }
@@ -667,6 +687,18 @@
       }
     } catch (e) {}
     return '';
+  }
+
+  const METRICS_HOVER_INTENT_MS = 260;
+
+  function clearMetricsTooltipShowTimer() {
+    if (window.__ag_metrics_tt_show_timer) {
+      try {
+        clearTimeout(window.__ag_metrics_tt_show_timer);
+      } catch (e) {}
+      window.__ag_metrics_tt_show_timer = null;
+    }
+    window.__ag_metrics_tt_intent_pill = null;
   }
 
   function clearMetricsTooltipHideTimer() {
@@ -768,6 +800,9 @@
   }
 
   function hideMetricsTooltipIfOwner(pill) {
+    if (!pill || window.__ag_metrics_tt_intent_pill === pill) {
+      clearMetricsTooltipShowTimer();
+    }
     if (!pill || window.__ag_active_tooltip_pill === pill) {
       clearMetricsTooltipHideTimer();
       const tt = document.getElementById('ag-live-metrics-tooltip');
@@ -897,6 +932,26 @@
     return state;
   }
 
+  function showMetricsTooltipForPill(pill) {
+    if (!pill || !pill.isConnected) return;
+    const map = isWeakMapInstance(window.__ag_pill_tooltip_map) ? window.__ag_pill_tooltip_map : pillTooltipMap;
+    const ttHtml = map.get(pill);
+    if (!ttHtml) return;
+    const tt = ensureMetricsTooltip();
+    if (!tt) return;
+    if (tt.innerHTML !== ttHtml) {
+      tt.innerHTML = ttHtml;
+    }
+    window.__ag_active_tooltip_pill = pill;
+    const r = pill.getBoundingClientRect();
+    const ttWidth = Math.min(450, Math.max(370, tt.offsetWidth || 400));
+    const left = Math.max(12, Math.min(r.left, window.innerWidth - ttWidth - 16));
+    const bottomPx = Math.min(window.innerHeight - r.top + 8, window.innerHeight - (tt.offsetHeight || 220) - 12);
+    tt.style.left = left + 'px';
+    tt.style.bottom = Math.max(8, bottomPx) + 'px';
+    tt.setAttribute('data-visible', '1');
+  }
+
   function createPillElement() {
     const pill = document.createElement('div');
     pill.className = 'ag-live-metrics-pill';
@@ -907,26 +962,46 @@
     span.setAttribute('data-ag-metrics-text', '1');
     pill.appendChild(span);
     pill.addEventListener('mouseenter', () => {
-      clearMetricsTooltipHideTimer();
-      const map = isWeakMapInstance(window.__ag_pill_tooltip_map) ? window.__ag_pill_tooltip_map : pillTooltipMap;
-      const ttHtml = map.get(pill);
-      if (!ttHtml) return;
-      const tt = ensureMetricsTooltip();
-      if (!tt) return;
-      if (tt.innerHTML !== ttHtml) {
-        tt.innerHTML = ttHtml;
+      const tt = document.getElementById('ag-live-metrics-tooltip');
+      const ttVisible = !!(tt && tt.getAttribute('data-visible') === '1');
+      if (ttVisible && window.__ag_active_tooltip_pill === pill) {
+        clearMetricsTooltipHideTimer();
+        showMetricsTooltipForPill(pill);
+        return;
       }
-      window.__ag_active_tooltip_pill = pill;
-      const r = pill.getBoundingClientRect();
-      const ttWidth = Math.min(450, Math.max(370, tt.offsetWidth || 400));
-      const left = Math.max(12, Math.min(r.left, window.innerWidth - ttWidth - 16));
-      const bottomPx = Math.min(window.innerHeight - r.top + 8, window.innerHeight - (tt.offsetHeight || 220) - 12);
-      tt.style.left = left + 'px';
-      tt.style.bottom = Math.max(8, bottomPx) + 'px';
-      tt.setAttribute('data-visible', '1');
+      if (!ttVisible) {
+        clearMetricsTooltipHideTimer();
+      }
+      if (window.__ag_metrics_tt_show_timer && window.__ag_metrics_tt_intent_pill === pill) {
+        return;
+      }
+      clearMetricsTooltipShowTimer();
+      window.__ag_metrics_tt_intent_pill = pill;
+      window.__ag_metrics_tt_show_timer = setTimeout(() => {
+        window.__ag_metrics_tt_show_timer = null;
+        window.__ag_metrics_tt_intent_pill = null;
+        if (!pill.isConnected) return;
+        if (typeof pill.matches === 'function' && !pill.matches(':hover')) return;
+        clearMetricsTooltipHideTimer();
+        showMetricsTooltipForPill(pill);
+      }, METRICS_HOVER_INTENT_MS);
     });
     pill.addEventListener('mouseleave', () => {
-      if (window.__ag_active_tooltip_pill !== pill) return;
+      if (window.__ag_metrics_tt_intent_pill === pill) {
+        clearMetricsTooltipShowTimer();
+      }
+      if (window.__ag_active_tooltip_pill !== pill) {
+        const tt = document.getElementById('ag-live-metrics-tooltip');
+        if (
+          tt &&
+          tt.getAttribute('data-visible') === '1' &&
+          !window.__ag_metrics_tt_hide_timer &&
+          !(typeof tt.matches === 'function' && tt.matches(':hover'))
+        ) {
+          scheduleMetricsTooltipHide(160);
+        }
+        return;
+      }
       const tt = document.getElementById('ag-live-metrics-tooltip');
       if (tt && tt.querySelector && tt.querySelector('.ag-tt-copy-btn')) {
         scheduleMetricsTooltipHide(160);
@@ -1087,12 +1162,60 @@
     return primary;
   }
 
+  function hasLocalMetricsDb(cached) {
+    if (!cached || typeof cached !== 'object') return false;
+    if (typeof cached.dbFound === 'boolean') return cached.dbFound;
+    return Boolean(cached.hasData || cached.sig);
+  }
+
+  function isBoxActivelyRunning(box) {
+    return !!(box && box.querySelector && box.querySelector('[data-testid="input-cancel-button"]'));
+  }
+
+  function shouldShowPendingForBox(box, cid) {
+    if (!cid || !CASCADE_UUID_RE.test(cid)) return false;
+    const cached = metricsById[cid];
+    if (!hasLocalMetricsDb(cached)) {
+      delete pendingRunUntilByCid[cid];
+      return false;
+    }
+    if (isBoxActivelyRunning(box)) {
+      pendingRunUntilByCid[cid] = Date.now() + 2500;
+      return true;
+    }
+    return (pendingRunUntilByCid[cid] || 0) > Date.now();
+  }
+
+  function applyPendingStateToPill(box, pill) {
+    if (!pill) return;
+    const textEl = getPillTextEl(pill);
+    const ttMap = isWeakMapInstance(window.__ag_pill_tooltip_map) ? window.__ag_pill_tooltip_map : pillTooltipMap;
+    pill.removeAttribute('data-ag-rendered-cid');
+    pill.setAttribute('data-ag-pending', '1');
+    ttMap.delete(pill);
+    hideMetricsTooltipIfOwner(pill);
+    const pendingLabel = !MODULES.i18n ? 'Measuring\u2026' : '采样中\u2026';
+    const nextHtml = `${PENDING_RING_SVG}<span class="ag-ring-after">${pendingLabel}</span>`;
+    const textChanged = !!(textEl && textEl.innerHTML !== nextHtml);
+    if (textEl && textChanged) {
+      textEl.innerHTML = nextHtml;
+    }
+    const wasHidden = pill.style.display !== 'inline-flex';
+    if (wasHidden) {
+      pill.style.display = 'inline-flex';
+    }
+    if (wasHidden || textChanged) {
+      scheduleDeferredPillLayout(box);
+    }
+  }
+
   function applyPayloadToPill(box, pill, payload) {
     if (!pill) return;
     const textEl = getPillTextEl(pill);
     const ttMap = isWeakMapInstance(window.__ag_pill_tooltip_map) ? window.__ag_pill_tooltip_map : pillTooltipMap;
     if (!payload || !payload.hasData) {
       pill.removeAttribute('data-ag-rendered-cid');
+      pill.removeAttribute('data-ag-pending');
       if (textEl && textEl.innerHTML !== '') {
         textEl.innerHTML = '';
       }
@@ -1101,6 +1224,7 @@
       hideMetricsTooltipIfOwner(pill);
       return;
     }
+    pill.removeAttribute('data-ag-pending');
     const renderedCid = String(payload.cascadeId || pill.getAttribute('data-ag-cascade-id') || '').trim().toLowerCase();
     if (renderedCid) {
       if (pill.getAttribute('data-ag-rendered-cid') !== renderedCid) {
@@ -1158,7 +1282,9 @@
       if (renderedCid !== cid || pill.style.display !== 'inline-flex') {
         applyPayloadToPill(box, pill, cached);
       }
-    } else if (renderedCid !== '' || pill.style.display === 'inline-flex') {
+    } else if (shouldShowPendingForBox(box, cid)) {
+      applyPendingStateToPill(box, pill);
+    } else if (renderedCid !== '' || pill.hasAttribute('data-ag-pending') || pill.style.display === 'inline-flex') {
       applyPayloadToPill(box, pill, null);
     }
   }
@@ -1175,6 +1301,7 @@
         } catch (e) {}
       }
       activeMetricsObservers.clear();
+      metricsDomObserverStarted = false;
       hideMetricsTooltipIfOwner(null);
       return null;
     }
@@ -1216,13 +1343,19 @@
           mountedNewPill = true;
         }
         const boxCid =
-          String(pill.getAttribute('data-ag-cascade-id') || '').trim().toLowerCase() ||
-          resolveBoxCascadeId(box, totalBoxes);
+          resolveBoxCascadeId(box, totalBoxes) ||
+          String(pill.getAttribute('data-ag-cascade-id') || '').trim().toLowerCase();
         if (boxCid && pill.getAttribute('data-ag-cascade-id') !== boxCid) {
           pill.setAttribute('data-ag-cascade-id', boxCid);
         }
         if (boxCid === cid) {
-          applyPayloadToPill(box, pill, payload);
+          if (payload.hasData) {
+            applyPayloadToPill(box, pill, payload);
+          } else if (shouldShowPendingForBox(box, cid)) {
+            applyPendingStateToPill(box, pill);
+          } else {
+            applyPayloadToPill(box, pill, null);
+          }
         }
       }
       if (mountedNewPill) {
@@ -1231,6 +1364,19 @@
       }
     } catch (e) {}
   };
+
+  function sendMetricsSubscription(watchedIds, watchedSig, forceRetry = false) {
+    if (typeof window.__agRequestMetrics !== 'function') return false;
+    if (!forceRetry && watchedSig === window.__ag_watched_cascade_sig) return true;
+    try {
+      window.__agRequestMetrics(JSON.stringify(watchedIds));
+      window.__ag_watched_cascade_sig = watchedSig;
+      lastMetricsReqAt = Date.now();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
 
   function checkRouteAndMountMetrics() {
     try {
@@ -1293,13 +1439,17 @@
       window.__ag_watched_cascade_id = primaryWatched;
       window.__ag_last_metrics = primaryWatched ? metricsById[primaryWatched] || null : null;
 
-      if (watchedSig !== window.__ag_watched_cascade_sig) {
-        window.__ag_watched_cascade_sig = watchedSig;
-        if (typeof window.__agRequestMetrics === 'function') {
-          try {
-            window.__agRequestMetrics(JSON.stringify(watchedIds));
-          } catch (e) {}
+      let hasUnackedCid = false;
+      for (let i = 0; i < watchedIds.length; i++) {
+        if (!(watchedIds[i] in metricsById)) {
+          hasUnackedCid = true;
+          break;
         }
+      }
+      if (watchedSig !== window.__ag_watched_cascade_sig) {
+        sendMetricsSubscription(watchedIds, watchedSig, false);
+      } else if (hasUnackedCid && Date.now() - lastMetricsReqAt >= 1200) {
+        sendMetricsSubscription(watchedIds, watchedSig, true);
       }
     } catch (e) {}
   }
@@ -1416,6 +1566,105 @@
     });
   }
 
+  const METRICS_DOM_SKIP_SEL =
+    '[data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .prose, .markdown, pre, code, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, .ag-live-metrics-pill, [data-ag-metrics-pill], #ag-live-metrics-tooltip, [data-testid="conversation-list-sidebar"]';
+
+  function isMetricsRelevantNode(node, rawInputId, watchDescendantSel) {
+    if (!node || node.nodeType !== 1) return 0;
+    if (rawInputId && node.id === rawInputId) return 1;
+    const tid = node.getAttribute && node.getAttribute('data-testid');
+    if (tid === 'input-cancel-button') return 2;
+    if (
+      tid === 'send-button' ||
+      tid === 'conversation-view' ||
+      tid === 'side-question-tab-conversation' ||
+      tid === 'subagent-tab-conversation'
+    ) {
+      return 1;
+    }
+    if (node.classList && node.classList.contains('agy-composer-footer')) return 1;
+    if (node.firstElementChild && node.querySelector) {
+      if (node.querySelector('[data-testid="input-cancel-button"]')) return 2;
+      if (watchDescendantSel && node.querySelector(watchDescendantSel)) return 1;
+    }
+    return 0;
+  }
+
+  function scheduleMetricsDomSync(forceBackendRefresh = false) {
+    if (IS_SWARM_PLUGIN_FRAME || !MODULES.metrics) return;
+    if (!metricsDomCheckRafId) {
+      metricsDomCheckRafId = scheduleTrackedHandle(activeMetricsRafs, requestAnimationFrame, () => {
+        metricsDomCheckRafId = 0;
+        ensureMetricsDomObserver();
+      checkRouteAndMountMetrics();
+      });
+    }
+    if (forceBackendRefresh) {
+      for (const delay of [100, 450]) {
+        scheduleTrackedHandle(
+          metricsRouteTimers,
+          (cb) => setTimeout(cb, delay),
+          () => {
+            ensureMetricsDomObserver();
+      checkRouteAndMountMetrics();
+            const curIds = Array.isArray(window.__ag_watched_cascade_ids) ? window.__ag_watched_cascade_ids : [];
+            if (curIds.length > 0) {
+              sendMetricsSubscription(curIds, curIds.join(','), true);
+            }
+          }
+        );
+      }
+    }
+  }
+
+  function ensureMetricsDomObserver() {
+    if (IS_SWARM_PLUGIN_FRAME || !MODULES.metrics || metricsDomObserverStarted) return;
+    if (!document.body || typeof MutationObserver !== 'function') return;
+    const rawId = String(SELECTORS.inputBoxId || '').trim();
+    const escId = rawId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const watchDescendantSel = escId
+      ? `[id="${escId}"], .agy-composer-footer, [data-testid="conversation-view"], [data-testid="side-question-tab-conversation"], [data-testid="subagent-tab-conversation"]`
+      : '.agy-composer-footer, [data-testid="conversation-view"], [data-testid="side-question-tab-conversation"], [data-testid="subagent-tab-conversation"]';
+    try {
+      const domObs = new MutationObserver((mutations) => {
+        let shouldSync = false;
+        let cancelRemoved = false;
+        for (let i = 0; i < mutations.length; i++) {
+          const m = mutations[i];
+          const t = m.target;
+          if (t && t.nodeType === 1 && t.closest && t.closest(METRICS_DOM_SKIP_SEL)) continue;
+          const added = m.addedNodes;
+          for (let j = 0; j < added.length; j++) {
+            const hit = isMetricsRelevantNode(added[j], rawId, watchDescendantSel);
+            if (hit > 0) {
+              shouldSync = true;
+              break;
+            }
+          }
+          const removed = m.removedNodes;
+          for (let k = 0; k < removed.length; k++) {
+            const hit = isMetricsRelevantNode(removed[k], rawId, watchDescendantSel);
+            if (hit === 2) {
+              shouldSync = true;
+              cancelRemoved = true;
+              break;
+            }
+            if (hit === 1) {
+              shouldSync = true;
+            }
+          }
+          if (cancelRemoved) break;
+        }
+        if (shouldSync) {
+          scheduleMetricsDomSync(cancelRemoved);
+        }
+      });
+      domObs.observe(document.body, { childList: true, subtree: true });
+      activeMetricsObservers.add(domObs);
+      metricsDomObserverStarted = true;
+    } catch (e) {}
+  }
+
   window.__ag_check_route_fn = checkRouteAndMountMetrics;
 
   if (window.__ag_metrics_route_watcher) {
@@ -1428,6 +1677,7 @@
     window.__ag_metrics_route_watcher = setInterval(checkRouteAndMountMetrics, 3000);
   }
   if (document.body || IS_SWARM_PLUGIN_FRAME) {
+    ensureMetricsDomObserver();
     checkRouteAndMountMetrics();
   }
 
@@ -1490,13 +1740,44 @@
         Frames: '关键帧',
         Previous: '上一帧',
         Next: '下一帧',
+        Hive: '蜂巢图谱',
+        'Graph view': '图谱视图',
+        'Close preview': '关闭预览',
+        'Open in new tab': '在新标签页打开',
         updating: '更新中',
         watching: '监听中',
         stopped: '已停止',
         stale: '待刷新',
+        running: '运行中',
         '(archived)': '（已归档）',
         '(empty)': '（空）',
-        'tasks done': '项任务已完成'
+        'tasks done': '项任务已完成',
+        'Tasks done': '已完成任务',
+        'Message just sent': '刚发送消息',
+        'Waiting on': '等待响应',
+        'Latest action': '最新动作',
+        Zoom: '缩放',
+        Done: '已完成',
+        All: '全部',
+        'All channels': '全部频道',
+        'All workers': '全部协作者',
+        'Filter by worker': '按协作者筛选',
+        'Posts in every channel': '查看所有频道的发言',
+        'Updates automatically': '自动实时更新',
+        'Lost contact with the swarm sidecar; retrying': '与蜂群侧车断开连接，正在重试',
+        Overview: '概览',
+        "Narrator's page": '纪要员页面',
+        "Retry narrator's page": '重试纪要员页面',
+        "narrator's page · AI-generated": '纪要员页面 · AI 生成',
+        'Narrator view (AI-generated)': '纪要员视图（AI 生成）',
+        'Click to hide from the board': '点击在看板中隐藏',
+        'Hidden from the board; click to show': '已在看板中隐藏；点击显示',
+        'Nothing waiting': '无等待项',
+        'Nothing stuck': '无停滞项',
+        'Nothing needs you': '无需您处理项',
+        'Nothing running': '无运行项',
+        'Compare with now': '与当前对比',
+        'Open full timeline': '打开完整时间轴'
       }
     : null;
 
@@ -1511,6 +1792,10 @@
     if (sNorm !== s) {
       const exactNorm = DICT[sNorm];
       if (typeof exactNorm === 'string') return exactNorm;
+      if (SWARM_FRAME_ONLY_DICT) {
+        const swarmNorm = SWARM_FRAME_ONLY_DICT[sNorm];
+        if (typeof swarmNorm === 'string') return swarmNorm;
+      }
     }
     const aposAlias = DICT_APOS.get(sNorm);
     if (typeof aposAlias === 'string') return aposAlias;
@@ -1524,10 +1809,28 @@
     const hit = dictLookupCore(s);
     if (typeof hit === 'string') return hit;
     if (s.endsWith('\u2026')) {
-      return dictLookupCore(s.slice(0, -1) + '...');
+      const swapHit = dictLookupCore(s.slice(0, -1) + '...');
+      if (typeof swapHit === 'string') return swapHit;
+      const bareHit = dictLookupCore(s.slice(0, -1));
+      if (typeof bareHit === 'string') {
+        return bareHit.endsWith('\u2026') || bareHit.endsWith('...') ? bareHit : bareHit + '\u2026';
+      }
+      return undefined;
     }
     if (s.endsWith('...')) {
-      return dictLookupCore(s.slice(0, -3) + '\u2026');
+      const swapHit = dictLookupCore(s.slice(0, -3) + '\u2026');
+      if (typeof swapHit === 'string') return swapHit;
+      const bareHit = dictLookupCore(s.slice(0, -3));
+      if (typeof bareHit === 'string') {
+        return bareHit.endsWith('...') || bareHit.endsWith('\u2026') ? bareHit : bareHit + '...';
+      }
+      return undefined;
+    }
+    if (s.length > 2 && s.endsWith(':')) {
+      const bareColonHit = dictLookupCore(s.slice(0, -1));
+      if (typeof bareColonHit === 'string') {
+        return bareColonHit.endsWith('：') || bareColonHit.endsWith(':') ? bareColonHit : bareColonHit + '：';
+      }
     }
     return undefined;
   }
@@ -1583,7 +1886,7 @@
     }
 
     const CONTAINER_IMMUTABLE_EXCLUDE_SELECTOR =
-      'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [data-uri^="file:"], [data-uri^="vscode-"], a.inline-pill[href^="file:"], a.inline-pill[href^="vscode-"], #ag-live-metrics-pill, .ag-live-metrics-pill, [data-ag-metrics-pill], #ag-live-metrics-tooltip, #ag-token-nav-section, #ag-token-analytics-panel, #ag-ta-tooltip, [data-ag-token-ui], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title';
+      'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [data-uri^="file:"], [data-uri^="vscode-"], a.inline-pill[href^="file:"], a.inline-pill[href^="vscode-"], [data-testid="side-question-followup-user"], [data-testid="comment-card-text"], [data-testid="automation-name"], [data-testid="automation-instructions-text"], [data-testid="step-plan-item"], [data-testid="live-transcript"], [data-testid="voice-transcript-summary-lead"], [data-testid="voice-transcript-summary-point"], [data-testid="project-header"] span.truncate, #ag-live-metrics-pill, .ag-live-metrics-pill, [data-ag-metrics-pill], #ag-live-metrics-tooltip, #ag-token-nav-section, #ag-token-analytics-panel, #ag-ta-tooltip, [data-ag-token-ui], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title';
     const TEXT_IMMUTABLE_EXCLUDE_SELECTOR =
       'textarea, input, [contenteditable="true"], [data-testid="conversation-navigator-turn"], ' +
       CONTAINER_IMMUTABLE_EXCLUDE_SELECTOR;
@@ -1705,6 +2008,16 @@
 
     // Swarm 侧车专属动态规则（仅在 IS_SWARM_PLUGIN_FRAME 下生效，主窗口零开销零误伤）
     const RE_SWARM_NUM_OF_NUM = /^(\d+)\s+of\s+(\d+)$/i;
+    const RE_SWARM_N_OF_M_DONE = /^(\d+)\s+of\s+(\d+)\s+done$/i;
+    const RE_SWARM_OVER_DUR = /^over\s+([<0-9smhd]+(?:\s+\d+[smhd])*)$/i;
+    const RE_SWARM_HIVE_COORD_DONE = /^Coordinator\s*·\s*(\d+)\s+of\s+(\d+)\s+done$/i;
+    const RE_SWARM_HIVE_GROUP_TIP = /^(Working|Waiting|Resting|Blocked|Stuck|Done)\s*·\s*(\d+)\s*·\s*(.+)$/i;
+    const RE_SWARM_HIVE_AGENT_TIP =
+      /^(@[A-Za-z0-9._-]+)\s*·\s*(?:(Task)\s*·\s*)?(Resting|Working|Waiting|Blocked|Stuck|Done|Killed)$/i;
+    const RE_SWARM_MSG_ARIA =
+      /^([A-Za-z0-9._-]+)\s+to\s+([A-Za-z0-9._-]+(?:\s*,\s*[A-Za-z0-9._-]+)*),\s*(\d{1,2}:\d{2}(?:\s*[AP]M)?)$/i;
+    const RE_SWARM_CHIP_TIP =
+      /^([^\r\n]+?)\n(Click to hide from the board|Hidden from the board; click to show)$/;
     const RE_SWARM_WAITING_ON = /^Waiting\s+on\s+(@?\S+)$/i;
     const RE_SWARM_N_WAITING_ON = /^(\d+)\s+waiting\s+on\s+(@\S+)$/i;
     const RE_SWARM_N_STUCK = /^(\d+)\s+stuck$/i;
@@ -1748,6 +2061,11 @@
     const RE_INVOKED_SUBAGENT = /^Invoked\s+subagent:\s*(.+)$/i;
     const RE_BROWSER_TASK = /^Browser\s+task:\s*(.+)$/i;
     const RE_SUBAGENTS_COUNT = /^(\d+)\s+subagents?$/i;
+    const RE_ITEMS_RUNNING_BLOCKED = /^(\d+)\s+(?:(subagents\/tasks|subagents?|tasks?)\s+)?(running|blocked)$/i;
+    const RE_STEP_PLAN_CHIP =
+      /^(\d+\/\d+)\s+steps?(?:\s*·\s*(\d+)\s+failed)?(?:\s*·\s*(\d+)\s+skipped)?(?:\.\s*(Show|Hide)\s+plan)?$/i;
+    const RE_ARIA_BREADCRUMB_ENTITY = /^(Project|Conversation):\s*(.+)$/i;
+    const RE_TODAY_YESTERDAY_TIME = /^(Today|Yesterday)\s+(\d{1,2}:\d{2}(?:\s*[AP]M)?)$/i;
     const RE_PAREN_SUBAGENTS = /^\((\d+)\s+subagents?\)$/i;
     const RE_ARIA_PANE_HEADER = /^(.+?)\s+header$/i;
     const RE_SHOW_EARLIER_STEPS = /^Show\s+(\d+)\s+earlier\s+steps?$/i;
@@ -1851,7 +2169,14 @@
       /^(Gemini\b[\w .+-]*?|Claude\b[\w .+-]*?|GPT\b[\w .+-]*?|Orchestrator\b[\w .+()-]*?)\s+(Weekly|Daily|Monthly)\s+Limit$/i;
     const RE_MODEL_EFFORT_LABEL =
       /^(Gemini\b[\w .+-]*?|Claude\b[\w .+-]*?|GPT\b[\w .+-]*?)\s+(?:\((Extra\s+High|Minimal|Low|Medium|High|Extra|XHigh|Max)\)|(Extra\s+High|Minimal|Low|Medium|High|Extra|XHigh|Max))$/i;
-    const RE_YOUR_PLAN = /^Your Plan:\s*([^\r\n]{1,80})$/;
+    const RE_YOUR_PLAN = /^Your plan:\s*([^\r\n]{1,80})$/i;
+    const RE_BG_TASKS_COUNT = /^(\d+)\s+background\s+tasks?$/i;
+    const RE_WAITING_ON_YOU_COUNT = /^(\d+)\s+waiting\s+on\s+you$/i;
+    const RE_ALLOW_PLUGIN_TO = /^Allow (this plugin|the [^\r\n?]{1,80} plugin) to ([^\r\n?]{1,140})\?$/;
+    const RE_DISMISS_COLON = /^Dismiss(ed)?:\s*(.+)$/;
+    const RE_REVOKE_COLON = /^Revoke(\s+all)?:\s*(.+)$/;
+    const RE_RESOLVED_QUOTED = /^Resolved\s+["\u201c](.+)["\u201d]$/;
+    const RE_ARIA_PLUGIN_THEME_APPLY = /^(Applied|Apply)\s+([^\r\n]{1,80})$/;
     const RE_AVAILABLE_AI_CREDITS = /^Available AI Credits:\s*([^\r\n]{1,40})$/i;
     const RE_EXITED_CODE_ONLY = /^Exited with code\s+(-?\d+)(\.)?$/i;
     const RE_SUMMARY_EXITED_CODE = /^([^\r\n]{1,220}?)\s*·\s*Exited with code\s+(-?\d+)$/;
@@ -1994,10 +2319,29 @@
       return s;
     }
 
+    function formatStepPlanChipZh(m) {
+      let out = m[1] + ' 步';
+      if (m[2]) out += ' · ' + m[2] + ' 失败';
+      if (m[3]) out += ' · ' + m[3] + ' 跳过';
+      if (m[4]) out += '。' + (/^hide$/i.test(m[4]) ? '隐藏计划' : '显示计划');
+      return out;
+    }
+
+    function isUserEntityBreadcrumbText(el) {
+      if (!el || !el.closest) return false;
+      const seg = el.closest('[data-testid="breadcrumb-segment"]');
+      if (!seg) return false;
+      const rawAria = seg.getAttribute('data-ag-orig-aria-label') || seg.getAttribute('aria-label') || '';
+      if (/^(?:Project|Conversation|项目|对话)[:：]/i.test(rawAria)) return true;
+      const href = seg.getAttribute('href') || '';
+      return href.startsWith('/c/') || href.startsWith('/p/');
+    }
+
     function computeTextTranslation(raw, contextEl, textNode = null) {
       if (!raw) return null;
       const trimmed = raw.trim();
       if (!trimmed) return null;
+      if (isUserEntityBreadcrumbText(contextEl)) return null;
 
       // 1. 无原型静态词典 O(1) 精确匹配（附句尾句号自动回退；函数式 replace 防止 $&/$1 二次展开）
       let replacement = dictLookup(trimmed);
@@ -2048,7 +2392,27 @@
         if (RE_PINNED_COUNT.test(trimmed)) return raw.replace(RE_PINNED_COUNT, '$1 个已固定标签页');
         if (RE_MODELS_SELECTED.test(trimmed)) return raw.replace(RE_MODELS_SELECTED, '已选择 $1 个模型');
         if (RE_BROWSER_STEPS.test(trimmed)) return raw.replace(RE_BROWSER_STEPS, '$1 个浏览器步骤');
+        const mStepPlan = trimmed.match(RE_STEP_PLAN_CHIP);
+        if (mStepPlan) {
+          return raw.replace(trimmed, () => formatStepPlanChipZh(mStepPlan));
+        }
+        const mRunBlk = trimmed.match(RE_ITEMS_RUNNING_BLOCKED);
+        if (mRunBlk) {
+          const kindRaw = (mRunBlk[2] || '').toLowerCase();
+          const stateZh = mRunBlk[3].toLowerCase() === 'blocked' ? '受阻' : '运行中';
+          const unitZh =
+            kindRaw === 'subagents/tasks'
+              ? ' 个子 Agent/任务'
+              : kindRaw.startsWith('subagent')
+                ? ' 个子 Agent '
+                : kindRaw.startsWith('task')
+                  ? ' 个任务'
+                  : ' 项';
+          return raw.replace(trimmed, () => mRunBlk[1] + unitZh + stateZh);
+        }
         if (RE_SUBAGENTS_COUNT.test(trimmed)) return raw.replace(RE_SUBAGENTS_COUNT, '$1 个子 Agent');
+        if (RE_BG_TASKS_COUNT.test(trimmed)) return raw.replace(RE_BG_TASKS_COUNT, '$1 个后台任务');
+        if (RE_WAITING_ON_YOU_COUNT.test(trimmed)) return raw.replace(RE_WAITING_ON_YOU_COUNT, '$1 项等待您处理');
         const mMediaAtt = trimmed.match(RE_MEDIA_ATTACHMENTS);
         if (mMediaAtt) {
           const mediaMap = { image: '图片', audio: '音频', video: '视频' };
@@ -2068,6 +2432,7 @@
         if (RE_MEMBERS_COUNT.test(trimmed)) return raw.replace(RE_MEMBERS_COUNT, '$1 名成员');
         if (RE_MCP_FAILED_START.test(trimmed)) return raw.replace(RE_MCP_FAILED_START, '$1 个 MCP 服务器启动失败');
         if (IS_SWARM_PLUGIN_FRAME) {
+          if (RE_SWARM_N_OF_M_DONE.test(trimmed)) return raw.replace(RE_SWARM_N_OF_M_DONE, '已完成 $1 / $2');
           if (RE_SWARM_N_WAITING_ON.test(trimmed)) return raw.replace(RE_SWARM_N_WAITING_ON, '$1 项等待 $2');
           if (RE_SWARM_N_STUCK.test(trimmed)) return raw.replace(RE_SWARM_N_STUCK, '$1 项受阻停滞');
           if (RE_SWARM_N_NEEDS_YOU.test(trimmed)) return raw.replace(RE_SWARM_N_NEEDS_YOU, '$1 项需要您处理');
@@ -2118,12 +2483,24 @@
           }
         }
         if (firstUpper === 'O') {
+          const mOverDur = trimmed.match(RE_SWARM_OVER_DUR);
+          if (mOverDur) {
+            return raw.replace(trimmed, () => '历时 ' + formatCompactDurationZh(mOverDur[1]));
+          }
           const mOvNotes = trimmed.match(RE_SWARM_OV_NOTES);
           if (mOvNotes) {
             const rRaw = mOvNotes[1] ? mOvNotes[1].trim() : '';
             const rZh = rRaw ? dictLookup(rRaw) || rRaw : '';
             return raw.replace(trimmed, () => '概览 · 来自纪要员笔记' + (rZh ? ' · ' + rZh : ''));
           }
+        }
+        if (firstUpper === 'C' && RE_SWARM_HIVE_COORD_DONE.test(trimmed)) {
+          return raw.replace(RE_SWARM_HIVE_COORD_DONE, '协调器 · 已完成 $1 / $2');
+        }
+        const mHiveGrp = trimmed.match(RE_SWARM_HIVE_GROUP_TIP);
+        if (mHiveGrp) {
+          const stZh = dictLookup(mHiveGrp[1]) || mHiveGrp[1];
+          return raw.replace(trimmed, () => stZh + ' · ' + mHiveGrp[2] + ' · ' + mHiveGrp[3]);
         }
         if (firstUpper === 'F' && contextEl && contextEl.tagName === 'OPTION' && RE_SWARM_FROM_OPT.test(trimmed)) {
           return raw.replace(RE_SWARM_FROM_OPT, '来自 $1');
@@ -2224,6 +2601,10 @@
           return raw.replace(RE_MARKED_READ, '已将 $1 个对话标为已读');
         }
       } else if (firstUpper === 'T') {
+        const mTodayTime = trimmed.match(RE_TODAY_YESTERDAY_TIME);
+        if (mTodayTime) {
+          return raw.replace(trimmed, () => '今天 ' + mTodayTime[2]);
+        }
         if (RE_THOUGHT_FOR.test(trimmed)) return raw.replace(RE_THOUGHT_FOR, '已思考 $1');
         if (RE_THINKING_FOR.test(trimmed)) return raw.replace(RE_THINKING_FOR, '已思考 $1');
         if (RE_DELETE_RECORDINGS_CONFIRM.test(trimmed)) {
@@ -2246,6 +2627,14 @@
           const mResets = trimmed.match(RE_RESETS_IN);
           if (mResets) {
             return raw.replace(trimmed, () => formatCompactDurationZh(mResets[1]) + '后重置');
+          }
+          const mRevoke = trimmed.match(RE_REVOKE_COLON);
+          if (mRevoke) {
+            return raw.replace(trimmed, () => (mRevoke[1] ? '全部撤销：' : '撤销：') + mRevoke[2].trim());
+          }
+          const mResQuoted = trimmed.match(RE_RESOLVED_QUOTED);
+          if (mResQuoted) {
+            return raw.replace(trimmed, () => '已标为已处理“' + mResQuoted[1].trim() + '”');
           }
         }
         if (RE_EPHEMERAL_SUMMARY.test(trimmed)) {
@@ -2280,6 +2669,10 @@
         }
         if (RE_DELETED_RECORDINGS.test(trimmed)) {
           return raw.replace(RE_DELETED_RECORDINGS, '已删除 $1 条录音 ($2)');
+        }
+        const mDismiss = trimmed.match(RE_DISMISS_COLON);
+        if (mDismiss) {
+          return raw.replace(trimmed, () => (mDismiss[1] ? '已忽略：' : '忽略：') + mDismiss[2].trim());
         }
       } else if (firstUpper === 'U') {
         if (RE_USING_BROWSER_SEC.test(trimmed)) {
@@ -2380,6 +2773,10 @@
           return raw.replace(trimmed, () => '引用');
         }
       } else if (firstUpper === 'Y') {
+        const mYestTime = trimmed.match(RE_TODAY_YESTERDAY_TIME);
+        if (mYestTime) {
+          return raw.replace(trimmed, () => '昨天 ' + mYestTime[2]);
+        }
         const mYourPlan = trimmed.match(RE_YOUR_PLAN);
         if (mYourPlan) {
           return raw.replace(trimmed, () => '当前套餐：' + mYourPlan[1].trim());
@@ -2455,6 +2852,26 @@
         const mAvailCred = trimmed.match(RE_AVAILABLE_AI_CREDITS);
         if (mAvailCred) {
           return raw.replace(trimmed, () => '可用 AI 点数：' + mAvailCred[1].trim());
+        }
+        if (trimmed.length <= 230) {
+          const mAllowPlug = trimmed.match(RE_ALLOW_PLUGIN_TO);
+          if (mAllowPlug) {
+            const subjRaw = mAllowPlug[1].trim();
+            const permRaw = mAllowPlug[2].trim();
+            const permCap = permRaw ? permRaw.charAt(0).toUpperCase() + permRaw.slice(1) : '';
+            const permZh =
+              dictLookup(permRaw) ||
+              dictLookup(permRaw + '.') ||
+              (permCap && (dictLookup(permCap) || dictLookup(permCap + '.')));
+            if (permZh) {
+              const subjZh =
+                subjRaw === 'this plugin'
+                  ? '此插件'
+                  : subjRaw.replace(/^the\s+/i, '').replace(/\s+plugin$/i, '').trim() + ' 插件';
+              const cleanPermZh = permZh.replace(/[。.]+$/, '');
+              return raw.replace(trimmed, () => '允许' + (subjZh === '此插件' ? '' : ' ') + subjZh + ' 获取“' + cleanPermZh + '”权限吗？');
+            }
+          }
         }
         const mAutoFig = trimmed.match(RE_AUTO_FIG_WORKSPACE);
         if (mAutoFig) {
@@ -2679,6 +3096,18 @@
         const pName = mProj[1].trim();
         return '选择项目，当前：' + (pName === 'No project' || pName === 'No Project' ? '未关联项目' : pName);
       }
+      const mBcEnt = atrim.match(RE_ARIA_BREADCRUMB_ENTITY);
+      if (mBcEnt) {
+        const prefixZh = /^project$/i.test(mBcEnt[1]) ? '项目：' : '对话：';
+        return prefixZh + mBcEnt[2].trim();
+      }
+      const mStepPlanAttr = atrim.match(RE_STEP_PLAN_CHIP);
+      if (mStepPlanAttr) {
+        return formatStepPlanChipZh(mStepPlanAttr);
+      }
+      if (atrim === 'Send' && el && el.tagName === 'BUTTON') {
+        return '发送';
+      }
       const mLoc = atrim.match(RE_ARIA_LOCATION);
       if (mLoc) {
         const locName = mLoc[1].trim();
@@ -2701,6 +3130,12 @@
       const mOpenPlugin = atrim.match(RE_OPEN_PLUGIN_NAME);
       if (mOpenPlugin) {
         return '打开 ' + mOpenPlugin[1].trim() + ' 插件';
+      }
+      if (el && el.getAttribute && el.getAttribute('data-testid') === 'plugin-theme-apply') {
+        const mPlugTheme = atrim.match(RE_ARIA_PLUGIN_THEME_APPLY);
+        if (mPlugTheme) {
+          return (/^Applied/i.test(mPlugTheme[1]) ? '已应用主题：' : '应用主题：') + mPlugTheme[2].trim();
+        }
       }
       const mOpenSubAttr = atrim.match(RE_OPEN_SUBAGENT);
       if (mOpenSubAttr) {
@@ -2751,6 +3186,29 @@
         const mGotoSeq = atrim.match(RE_SWARM_GOTO_SEQ);
         if (mGotoSeq) {
           return '跳至 #' + mGotoSeq[1] + (mGotoSeq[2] ? '（' + mGotoSeq[2].trim() + '）' : '');
+        }
+        const mHiveAgent = atrim.match(RE_SWARM_HIVE_AGENT_TIP);
+        if (mHiveAgent) {
+          const stZh = dictLookup(mHiveAgent[3]) || mHiveAgent[3];
+          return mHiveAgent[1] + (mHiveAgent[2] ? ' · 任务 · ' : ' · ') + stZh;
+        }
+        const mMsgAria = atrim.match(RE_SWARM_MSG_ARIA);
+        if (mMsgAria) {
+          return mMsgAria[1] + ' 发给 ' + mMsgAria[2] + '，' + mMsgAria[3];
+        }
+        const mChipTip = atrim.match(RE_SWARM_CHIP_TIP);
+        if (mChipTip) {
+          const line1 = mChipTip[1]
+            .split(' · ')
+            .map((seg) => {
+              const t = seg.trim();
+              if (RE_SWARM_YOU_SUFFIX.test(t)) return t.replace(RE_SWARM_YOU_SUFFIX, '$1（您）');
+              if (RE_POSTS_COUNT.test(t)) return t.replace(RE_POSTS_COUNT, '$1 条发言');
+              return SWARM_FRAME_ONLY_DICT[t] || t;
+            })
+            .join(' · ');
+          const line2 = SWARM_FRAME_ONLY_DICT[mChipTip[2]] || mChipTip[2];
+          return line1 + '\n' + line2;
         }
         if (el && el.classList && el.classList.contains('o2-tprog')) {
           const mTpDone = atrim.match(RE_SWARM_TPROG_DONE);
@@ -3020,6 +3478,7 @@
       window.__ag_dcl_handler = null;
       ensureStylesAtEndOfHead();
   window.__ag_patch_version = PATCH_VERSION;
+      ensureMetricsDomObserver();
       checkRouteAndMountMetrics();
       if (MODULES.i18n && document.body) {
         if (typeof scanBodyFn === 'function') {

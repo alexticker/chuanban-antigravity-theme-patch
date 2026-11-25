@@ -4,6 +4,68 @@
 
 ---
 
+## [v6.0.3] - 2026-11-25
+
+> **适用版本**：Antigravity `2.35.1+` / `2.35.0` / `2.34.0+`（macOS `2.35.1` `CL=1029194470` × Windows 11 `2.35.1.0`，向下完全兼容 `2.33.x` / `2.32.x` / `2.31.x` / `2.30.0`）  
+> **核验基线**：macOS `2.35.1`（`562` 实机会话库 · `61` 次真实上下文压缩 · `Swarm` 蜂群真机实测） × Windows 11 `2.35.1.0`（PowerShell `5.1` · 系统代理 · `W603-Check 1 ~ 7` 双端真机全绿） × 内部 `Claude Opus 5.5 (High)` 六专题两轮独立对抗审阅  
+> **社区致谢**：特别感谢 [@Sereneoned](https://github.com/Sereneoned)（[PR #39](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/pull/39) Windows 重拉系统代理保留与 `.lnk` 扫描限深）、[@abaca43n](https://github.com/abaca43n)（[PR #40](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/pull/40) Token 统计面板响应式等高布局与底栏胶囊 `260ms` 悬浮意图防误触）、[@ghang](https://github.com/ghang)（[PR #41](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/pull/41) 外观面板独立「跟随系统」日夜配对开关），以及 [@yjz211](https://github.com/yjz211)（[Issue #42](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/issues/42) Windows 标题栏浅色切换与悬停反馈排障）与 [@henrychou0312](https://github.com/henrychou0312)（[Issue #38](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/issues/38) Remote SSH 无本地库胶囊常驻反馈）！
+
+### Added, Fixed & Perf（Antigravity `2.35.1` 全链路漂移对齐 + 外观「跟随系统」开关 + Token 统计与指标胶囊交互升级 + Windows 11 标题栏/代理/参数接力专项修复 + `2,210` 条零冲突词典）
+- **新增外观界面独立「跟随系统 / Follow System」开关，保留浅色/深色预设配对（`core/runtime.js` / `core/theme.css`，合入并加固 [#41](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/pull/41)）**：
+  - 在「系统设置 → 外观界面」顶部新增零配置膨胀的独立「跟随系统」拨动开关（复用客户端自身 `localStorage['antigravity-theme'] = 'system'`，不污染 `user/config.json`）：开启后随系统昼夜自动切换用户各自选定的浅色 `preset`（如 `MO 莫兰迪色` / `✳️ Absolutely！`）与深色 `darkPreset`（如 `📖 暖纸深色` / `🌙 深色`），并将 `A 原版配色` 与跟随系统解耦为纯粹的手动原版直通档；
+  - 开启跟随期间点击同极性预设原地更新对应配对，点击相反极性预设立即切换预览并自动退出跟随模式（开关悬停气泡内建双语交互说明）；补齐 `DEFAULT_EXCLUDE_I18N` 双语免翻守卫与 `Swarm` 子帧 `native` 原版档跟随系统双向极性同步（`F-W603-1`）。
+- **设置弹窗「Token 统计」布局重构、模型/场景归因升级与底栏胶囊 `260ms` 悬浮意图机制（`core/runtime.js` / `core/theme.css` / `core/daemon.mjs`，合入并加固 [#40](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/pull/40)）**：
+  - **底栏指标胶囊 `260ms` 悬浮意图与双胶囊零竞争**：为 `.ag-live-metrics-pill` 引入 `260ms` 悬停意图检测与 `120ms` 移入卡片宽限期，彻底消除光标从消息流滑向输入框时意外闪出大号浮层的打断感，并修复分屏多胶囊快速切换的指针状态机竞争；
+  - **`@container` 响应式 `4:3` 布局与等高翻页舞台**：将弹窗宽度监听升级为纯 CSS `container-type: inline-size` + `@container (max-width: 720px)`，基于 CSS `subgrid` 对齐 KPI 指标卡底边，通过 `ResizeObserver` 锁定会话表翻页最小高度防滚动条跳动，并在关闭设置弹窗或热重载时即时 `disconnect()` 释放监听（`F-W603-2`）；模型配额池徽标精简为 `Claude` 并附 `Claude 与 GPT-OSS 共享配额池` 悬停说明；
+  - **`2.35.0 / 2.35.1` SQLite 模型、Swarm 协作者与上下文口径精准对齐（`TA_CACHE_SCHEMA_REV = 5`）**：扩充模型映射表至 **55 个模型标识**（覆盖 `Gemini 4 Hydrogen / Argon / Carbon / Neon`、`Claude Opus/Sonnet 5.5`、思考预算合并变体与 `GPT-OSS`）；解析 `Swarm` 协作数据库为会话明细赋予 `@worker (Model)` 真实协作者名称，支持零 Token 父级中继会话的 `invoke_subagent` 子轨迹穿透归集；修复后台任务唤醒场景下连续多条 `[Message]` 步骤漏合并问题（精准排除 `/task-` 斜杠命令与 `sender=system` 系统回执，`M-Fix-1`），并经 `562` 库 `61` 次真实压缩实证保留 `last.ctx` 实时末轮上下文占用口径（`M-Fix-2`）。
+- **Windows 11 原生标题栏 `TitleBarOverlay` 零过渡污染修复与 `2.35.0+` 自绘窗口控制键适配（`core/runtime.js` / `core/theme.css` / `install.mjs` / `core/daemon.mjs`，修复 [#42](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/issues/42)）**：
+  - **根治切回 `Absolutely！` 浅色后顶栏按钮灰暗看不清**：修复 `syncWinTitleBarOverlay()` 在 `theme.css` `150ms` 过渡首帧（`2.4%` 插值）读取中间态背景色 `#EEEBDF` 并因缺少过渡结束复核而永久锁死错误 `symbolColor` 的缺陷，改为 CSS 变量直读优先 + 相对亮度对比度兜底守卫 + `transitionend` / `180ms` 双保险重核；
+  - **查明并适配 Windows 11 系统深色模式原生标题栏悬停限制**：定位 Antigravity Electron 主进程未同步设置 `nativeTheme.themeSource` 导致 Win11 系统深色模式下原生 `WindowsCaptionButton` 最小化/最大化悬停半透明白底在浅色顶栏上不可见的宿主限制，完整适配 `2.35.0+` 新增的 `--custom-window-controls` 标志，在三套暖纸浅色预设下提供高对比石青/暖褐悬停块与 `#C42B1C` 关闭红底反馈。
+- **跨平台 `M2` 重拉启动参数保留、Windows 系统代理继承与 `.lnk` 限深扫描（`install.mjs` / `core/daemon.mjs`，合入并加固 [#39](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/pull/39)）**：
+  - **OS 分层无损保留自定义启动参数与工作区路径**：`relaunch` 与守护进程 `M2` 冷启动接力现自动提取并保留原进程命令行参数（如 `--custom-window-controls`、`--profile`、`--proxy-server` 及待打开工作区目录；Windows 走 PowerShell `CommandLineToArgvW` 精准解析含空格参数，Linux 走 `/proc/<pid>/cmdline` NUL 分隔，macOS 剥离 `.app` 路径前缀保留全部 `--flag` 并透传 `env`）；
+  - **Windows 重拉系统代理注入与回环保护**：在 Windows 下重拉客户端时若当前进程未显式设置代理环境变量，自动读取 `HKCU\...\Internet Settings` 注入 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`（强制保底 `127.0.0.1,localhost,::1` 防止回环 CDP/本地插件被代理劫持，自动跳过空值注册表项并将 `<local>` 与 CIDR 网段归一化），同时将开始菜单 `.lnk` 递归扫描深度收紧至 `maxDepth = 3` 消除深层目录阻塞；
+  - **`doctor` 源码同步诊断**：新增 `sourceSync` 字段，当在仓库源码目录运行 `node install.mjs doctor` 时自动比对仓库 `core/*` 与已安装目录 SHA-256，防止本地改码漏跑 `install` 造成排障误判。
+- **Remote SSH 指标胶囊静默门禁、`Swarm` `1.5s` 轮询零闪烁翻译护盾与 `2,210` 条零冲突汉化（`core/daemon.mjs` / `core/runtime.js` / `core/i18n.json`，修复 [#38](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/issues/38)）**：
+  - **Remote SSH 无本地库胶囊隐身（[#38](https://github.com/Anarcadia/chuanban-antigravity-theme-patch/issues/38)）**：在 `querySessionMetrics` 区分「本地库已落盘但首轮尚未产出 `gen_metadata`（`dbFound: true`）」与「Remote SSH 会话库位于远端主机（`dbFound: false`）」，远端会话自动隐藏胶囊不再无限常驻显示 `采样中…`；
+  - **`Swarm` 蜂群面板零闪烁护盾与 `2.35.0 / 2.35.1` 全面汉化**：针对 `Swarm` 面板每 `1.5s` 全量重绘 `innerHTML` 引发的英文闪回，在插件子帧内挂载实例级 `Element.prototype.innerHTML` / `Node.prototype.textContent` 写入前同步预翻译护盾（切 `EN` 自动卸载还原），修复 `step-plan-chip` 步骤进度芯片、空闲状态文本、标点后缀剥离回退、`narrator` 播报 `srcdoc` 主题同步及用户消息区免翻隔离，将零冲突基准词典从 `1,965` 条扩充至 **`2,210` 条**（同步补齐 macOS `Cmd` 与 Windows `Ctrl` 快捷键变体）。
+
+---
+
+## [v6.0.2] - 2026-11-23
+
+> **适用版本**：Antigravity `2.34.0+` / `2.33.x`（向下完全兼容 `2.32.x` / `2.31.x` / `2.30.0`）  
+> **核验基线**：macOS `2.34.0` × Windows 11 `2.34.0.0`（PowerShell `5.1` · 无环境变量仅系统代理 `127.0.0.1:7897` · 中文路径 · `W-Font-Check 1 ~ 6` 双端真机实测全绿）
+
+### Added & Fixed（新用户一键直链自动下载字体、ZIP 自动解压、Windows UTF-16 注册表写入与全链路字体边缘场景加固）
+- **内置零依赖跨平台字体自动下载器，根治新用户直接复制 Prompt 报「字体缺失」（`install.mjs` / `SKILL.md` / `README.md`）**：
+  - 新增 `node install.mjs download-fonts` 与 `node install.mjs install-fonts --auto-download` 子命令：内置 3 枚 Anthropic 字体与 `170 MB` 拆分版更纱黑体 `Windows-Sarasa-Split-SC-TTF-v1.0.43.zip` 的 `drive.usercontent.google.com/download?id=...&export=download&confirm=t` 直链清单，绕过 Google Drive 文件夹 SPA 网页与 >100 MB 病毒扫描 HTML 拦截页；
+  - **代理感知三级下载回退 + 二进制魔数校验**：优先使用 `curl` / `curl.exe`（Windows 未配 `HTTP_PROXY`/`HTTPS_PROXY` 时自动读取 `HKCU\...\Internet Settings` 系统代理），失败自动回退 Windows `.NET HttpClient`（原生继承 WinINET/PAC 代理并流式落盘）与 Node `22+` `fetch`；强校验 ZIP（`PK\x03\x04`）与 TTF/OTF/TTC 文件头魔数及最小字节数，显式拦截 HTML 拦截页/配额页，支持缓存命中与按缺失项增量精准下载。
+- **`install-fonts --from` 原生支持 `.zip` 自动解压与防静默假成功（`install.mjs`）**：
+  - `--from` 现支持直接传入 `.zip` 压缩包（及目录内自动发现字体 `.zip` 解压，Windows 走 `.NET ZipFile`，macOS/Linux 走 `unzip` / `ditto` / `python3 -m zipfile`），同时兼容中文路径；
+  - 若目标目录内未找到任何字体文件（`0` 个）或 Windows 注册表写入失败，明确返回 `ok: false` 与非零退出码（不再假报 `ok: true`），并在 `--auto-download` 中精准入队下载产物与漏注册文件、按规范化目标路径去重。
+- **Windows 字体检测、UTF-16 注册表写入与 DirectWrite 重启感知加固（`install.mjs`）**：
+  - 将 `runInstallFonts()` 写注册表从 `reg.exe` 升级为单次 PowerShell `.NET Microsoft.Win32.Registry.CurrentUser.CreateSubKey(...)` UTF-16 原生写入并合并 `AddFontResource` + `WM_FONTCHANGE`，彻底消除中文用户名下的 CP936 路径乱码与首次建键/静默吞错问题，兼容 PowerShell 5.1 单元素数组序列化；
+  - 区分 `C:\Windows\Fonts` 与 `%LOCALAPPDATA%\Microsoft\Windows\Fonts`（`F-W602-1`），精准识别「手动复制文件但漏写 `HKCU\...\Fonts` 注册表」的伪已装字体并输出 `fonts.unregisteredWarning`（已装拆分 SC TTF 时自动过滤已退订/遗留 `.ttc`，`F-W602-3`）；`readWinHkcuFontRegistryEntries()` 超时提升至 `12s` 并补 `reg query` 兜底；
+  - 修复 Windows `Get-CimInstance Win32_Process` 遇线程耗尽 `0x800700a4` 时 `runningProcesses` 静默为空的隐患，增加 `Get-Process` 主窗体兜底（`F-W602-2`），确保运行期装字体准确提示 `restartAntigravityRequired: true`；
+  - 抽离公共 `buildFontReport()` 统一注入 `doctor` / `install` / `verify` 输出，并在 `SKILL.md` / `README.md` 同步升级新用户一键自动安装与断网手动兜底引导。
+
+---
+
+## [v6.0.1] - 2026-11-23
+
+> **适用版本**：Antigravity `2.34.0+` / `2.33.x`（向下完全兼容 `2.32.x` / `2.31.x` / `2.30.0`）
+
+### Fixed（「书卷暖纸 `claude-warm`」Claude 暖陶色系回滚与新建会话/窗口指标胶囊自愈加固）
+- **回滚 `📖 暖纸深色`（`claude-warm`）配色漂移，恢复纯正 Claude 暖炭陶橙色系（`core/theme.css` / `core/runtime.js` / `README.md`）**：
+  - 将 `v6.0.0` 中误跟随莫兰迪冷石青色系的 `claude-warm` 输入框与界面点缀完整回滚至 `v5.5.5` 纯正 Claude 暖色基准：暖炭棕画布 `#242320` + 侧栏 `#1B1A18` + 象牙白正文 `#F3F0E4` + 未聚焦暖陶暗褐 `#6E4436` → 聚焦 100% 实色陶土暖橙 `#D97757` 单层 `2px` 合并输入框与 `#D97757` 发送按钮；
+  - 同步对齐 `claude-warm`（及 `Absolutely！`）底栏上下文圆环进度条、选区高亮、行内代码、文件胶囊、Token 统计热力图及 Windows 11 原生标题栏/`Swarm` 子帧背景色。
+- **根治新建会话/窗口底部实时指标胶囊间歇缺失与重挂载空白（`core/runtime.js` / `core/daemon.mjs`）**：
+  - **订阅回执自愈闭环**：仅在 `__agRequestMetrics` 绑定调用成功后锁定 `watchedSig`，并对尚未收到守护进程回执的活跃会话自动重发订阅，配合守护进程端 `syncMetricsForSession` 单飞合并锁，彻底消除早期注入或跨窗切换导致的「必须切去其他会话再切回才出指标」锁死问题；
+  - **输入框重建单帧（`<40ms`）自动补挂**：新增零流式开销的输入框结构观察器（自动跳过 `[data-markdown-root]` 等高频文本流），当呼出 `Swarm` / Artifact 侧栏或权限卡切换触发 React 重建输入框时单帧自动恢复胶囊，消除最长 `3s` 的轮询空窗期；
+  - **新会话首轮「采样中…」占位与停笔即时拉取**：新开会话首轮尚无历史 `gen_metadata` 时展示圆环 + `采样中…` / `Measuring…` 低干扰状态，并在模型停笔瞬间（`100ms`）主动触发 SQLite 指标拉取，无需等待 `2.5s` 后台轮询；同时收窄 `resolveBoxCascadeId` 优先匹配 `conversation-view` 防止内层非 UUID 属性遮蔽。
+
+---
+
 ## [v6.0.0] - 2026-11-23
 
 > **适用版本**：Antigravity `2.34.0+` / `2.33.x`（向下完全兼容 `2.32.x` / `2.31.x` / `2.30.0`）  

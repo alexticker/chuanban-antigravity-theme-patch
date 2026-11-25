@@ -2117,6 +2117,7 @@ function parseGenMetadataRow(r) {
   const chatStart = chatStartRaw instanceof Uint8Array ? parseProto(chatStartRaw) : new Map();
   const ctxWinRaw = chatStart.get(10);
   const ctxWin = ctxWinRaw instanceof Uint8Array ? parseProto(ctxWinRaw) : new Map();
+  const estCtx = ctxWin.get(1) || 0;
   const maxCtx = ctxWin.get(4) || 0;
   const ttftRaw = chat.get(11);
   const ttftMap = ttftRaw instanceof Uint8Array ? parseProto(ttftRaw) : new Map();
@@ -2126,8 +2127,13 @@ function parseGenMetadataRow(r) {
   const inTok = usage.get(2) || 0;
   const outTok = usage.get(3) || 0;
   const cacheRead = usage.get(5) || 0;
+  const apiProvider = usage.get(6) || 0;
   const thinkTok = usage.get(9) || 0;
   const respTok = usage.get(10) || 0;
+  const slugRaw = chat.get(19);
+  const slug = slugRaw instanceof Uint8Array ? textDecoder.decode(slugRaw) : '';
+  const thinkUnreported =
+    !usage.has(9) && thinkTok === 0 && (apiProvider === 26 || /^claude-/i.test(slug));
   const ttft = (ttftMap.get(1) || 0) + (ttftMap.get(2) || 0) / 1e9;
   const stream = (streamMap.get(1) || 0) + (streamMap.get(2) || 0) / 1e9;
 
@@ -2137,9 +2143,11 @@ function parseGenMetadataRow(r) {
     outTok,
     cacheRead,
     ctx: inTok + cacheRead,
+    estCtx,
     maxCtx,
     thinkTok,
     respTok,
+    thinkUnreported,
     ttft,
     stream,
     totDur: ttft + stream
@@ -2157,7 +2165,7 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
   if (!DatabaseSync) return null;
   if (!cascadeId || !UUID_RE.test(cascadeId)) return null;
   const state = precomputedState || getDbState(cascadeId, endpointOrDir);
-  if (!state || !state.dbPath || !state.sig) return { cascadeId, hasData: false };
+  if (!state || !state.dbPath || !state.sig) return { cascadeId, hasData: false, dbFound: false };
   const { dbPath, sig } = state;
   const conversationsDir = path.dirname(dbPath);
   const childSnap =
@@ -2203,11 +2211,37 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
       const userStat = db
         .prepare('SELECT COUNT(*) AS cnt, COALESCE(MAX(idx), -1) AS lastIdx FROM steps WHERE step_type = 14')
         .get();
-      const lastUserStepIdx = userStat?.lastIdx ?? -1;
-      const userStepsCount = userStat?.cnt ?? 0;
+      const rawUserLastIdx = userStat?.lastIdx ?? -1;
+      const rawUserStepsCount = userStat?.cnt ?? 0;
+      let lastTurnStepIdx = rawUserLastIdx;
+      let effectiveTurnsCount = rawUserStepsCount;
+      let isSubagentWakeTurns = false;
+      if (rawUserStepsCount === 0) {
+        // 子 Agent 与 Swarm Worker 会话不含 step_type=14，改按外部消息唤醒边界切分轮次（合并连发 [Message] 并排除自身后台 /task- 与系统广播）
+        isSubagentWakeTurns = true;
+        const wakeStat = db
+          .prepare(
+            `SELECT COUNT(*) AS cnt, COALESCE(MAX(s.idx), -1) AS lastIdx
+             FROM steps s
+             WHERE s.step_type = 101
+               AND instr(substr(s.step_payload, 1, 1024), CAST('[Message]' AS BLOB)) > 0
+               AND instr(substr(s.step_payload, 1, 1024), CAST('/task-' AS BLOB)) = 0
+               AND instr(substr(s.step_payload, 1, 1024), CAST('sender=system' AS BLOB)) = 0
+               AND NOT EXISTS (
+                 SELECT 1 FROM steps p
+                 WHERE p.idx = s.idx - 1
+                   AND p.step_type = 101
+                   AND instr(substr(p.step_payload, 1, 1024), CAST('[Message]' AS BLOB)) > 0
+               )`
+          )
+          .get();
+        const wakeCnt = wakeStat?.cnt ?? 0;
+        lastTurnStepIdx = wakeStat?.lastIdx ?? -1;
+        effectiveTurnsCount = wakeCnt > 0 ? wakeCnt : 1;
+      }
       const turnStat = db
         .prepare('SELECT COUNT(*) AS cnt FROM steps WHERE step_type = 15 AND idx > ?')
-        .get(lastUserStepIdx);
+        .get(lastTurnStepIdx);
       const rawTurnSteps = turnStat?.cnt ?? 0;
 
       let inc = incrementalMetricsMap.get(dbPath);
@@ -2215,9 +2249,10 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
         inc &&
         (rowCount < inc.rowCount ||
           maxIdx < inc.maxIdx ||
-          userStepsCount < inc.userStepsCount ||
-          lastUserStepIdx < inc.lastUserStepIdx ||
-          (lastUserStepIdx !== inc.lastUserStepIdx && userStepsCount <= inc.userStepsCount))
+          effectiveTurnsCount < inc.userStepsCount ||
+          lastTurnStepIdx < inc.lastUserStepIdx ||
+          isSubagentWakeTurns !== Boolean(inc.isSubagentWakeTurns) ||
+          (lastTurnStepIdx !== inc.lastUserStepIdx && effectiveTurnsCount <= inc.userStepsCount))
       ) {
         inc = null;
       }
@@ -2251,8 +2286,9 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
           }
           inc.rowCount = rowCount;
           inc.maxIdx = maxIdx;
-          inc.userStepsCount = userStepsCount;
-          inc.lastUserStepIdx = lastUserStepIdx;
+          inc.userStepsCount = effectiveTurnsCount;
+          inc.lastUserStepIdx = lastTurnStepIdx;
+          inc.isSubagentWakeTurns = isSubagentWakeTurns;
         } else {
           inc = null;
         }
@@ -2282,8 +2318,9 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
         inc = {
           rowCount: rows.length,
           maxIdx: rows.length > 0 ? rows[rows.length - 1].idx : -1,
-          userStepsCount,
-          lastUserStepIdx,
+          userStepsCount: effectiveTurnsCount,
+          lastUserStepIdx: lastTurnStepIdx,
+          isSubagentWakeTurns,
           items,
           validItems,
           totalIn,
@@ -2294,7 +2331,7 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
         };
       }
 
-      return { empty: false, inc, userStepsCount, rawTurnSteps };
+      return { empty: false, inc, userStepsCount: effectiveTurnsCount, isSubagentWakeTurns, rawTurnSteps };
     });
 
     if (parentDbRes.empty) {
@@ -2302,6 +2339,7 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
       const emptyPayload = {
         cascadeId,
         hasData: false,
+        dbFound: true,
         sig: compositeSig,
         isDraining: Boolean(childSnap?.isDraining),
         partialStale: Boolean(childSnap?.partialStale)
@@ -2312,7 +2350,7 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
       return emptyPayload;
     }
 
-    const { inc, userStepsCount, rawTurnSteps } = parentDbRes;
+    const { inc, userStepsCount, isSubagentWakeTurns, rawTurnSteps } = parentDbRes;
     if (uncParent && Date.now() - tParentWallStart > 400) {
       wslUncBackoffUntil = Date.now() + 45000;
     }
@@ -2323,6 +2361,7 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
       const emptyPayload = {
         cascadeId,
         hasData: false,
+        dbFound: true,
         sig: compositeSig,
         isDraining: Boolean(childSnap?.isDraining),
         partialStale: Boolean(childSnap?.partialStale)
@@ -2409,12 +2448,25 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
     let turnThink = 0;
     let turnResp = 0;
     let turnDur = 0;
+    let turnAllThinkUnreported = turnSlice.length > 0;
     for (let i = 0; i < turnSlice.length; i++) {
       turnIn += turnSlice[i].inTok;
       turnOut += turnSlice[i].outTok;
       turnThink += turnSlice[i].thinkTok;
       turnResp += turnSlice[i].respTok;
       turnDur += turnSlice[i].totDur;
+      if (!turnSlice[i].thinkUnreported || turnSlice[i].thinkTok > 0) {
+        turnAllThinkUnreported = false;
+      }
+    }
+    let sessionAllThinkUnreported = totalThink === 0 && valid.length > 0;
+    if (sessionAllThinkUnreported) {
+      for (let i = 0; i < valid.length; i++) {
+        if (!valid[i].thinkUnreported) {
+          sessionAllThinkUnreported = false;
+          break;
+        }
+      }
     }
 
     const last = valid[valid.length - 1];
@@ -2457,6 +2509,8 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
       ? `<div class="ag-tt-warn"><div class="ag-tt-warn-hdr"><span class="ag-tt-warn-lbl">⚠ ${escapeHtmlSafe(zhTitleStatus.label)}</span></div><span class="ag-tt-warn-val">${escapeHtmlSafe(zhTitleStatus.detail)}</span>${zhCmdRowHtml}</div>`
       : '';
 
+    const turnsUnitEn = isSubagentWakeTurns ? (userStepsCount === 1 ? 'wake' : 'wakes') : (userStepsCount === 1 ? 'turn' : 'turns');
+    const turnsUnitZh = isSubagentWakeTurns ? '次唤醒' : '轮提问';
     let inlineHtml = '';
     let tooltipHtml = '';
 
@@ -2475,11 +2529,17 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
         zhWarnInlineHtml
       ].join('');
 
+      const turnOutDetailEn = turnAllThinkUnreported
+        ? `Out ${fmtNum(turnOut)} (Think+Resp merged)`
+        : `Out ${fmtNum(turnOut)} (Think ${fmtNum(turnThink)} + Resp ${fmtNum(turnResp)})`;
+      const turnOutDetailZh = turnAllThinkUnreported
+        ? `输出 ${fmtNum(turnOut)} (含思考链)`
+        : `输出 ${fmtNum(turnOut)} (思考 ${fmtNum(turnThink)} + 响应 ${fmtNum(turnResp)})`;
       const turnRowHtml =
         turnSteps > 1
           ? isEnMetrics
-            ? `<div class="ag-tt-row"><span class="ag-tt-lbl">Turn Total (${turnSteps} steps)</span><span class="ag-tt-val">Out ${fmtNum(turnOut)} (Think ${fmtNum(turnThink)} + Resp ${fmtNum(turnResp)}) | ${turnDur.toFixed(1)}s</span></div>`
-            : `<div class="ag-tt-row"><span class="ag-tt-lbl">本轮合计 (${turnSteps}步)</span><span class="ag-tt-val">输出 ${fmtNum(turnOut)} (思考 ${fmtNum(turnThink)} + 响应 ${fmtNum(turnResp)}) | 耗时 ${turnDur.toFixed(1)}s</span></div>`
+            ? `<div class="ag-tt-row"><span class="ag-tt-lbl">Turn Total (${turnSteps} steps)</span><span class="ag-tt-val">${turnOutDetailEn} | ${turnDur.toFixed(1)}s</span></div>`
+            : `<div class="ag-tt-row"><span class="ag-tt-lbl">本轮合计 (${turnSteps}步)</span><span class="ag-tt-val">${turnOutDetailZh} | 耗时 ${turnDur.toFixed(1)}s</span></div>`
           : '';
       const combinedOut = totalOut + childOut;
       const subRowHtml =
@@ -2497,9 +2557,19 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
           ? isEnMetrics
             ? `<div class="ag-tt-row"><span class="ag-tt-lbl">Total Output</span><span class="ag-tt-val">Total ${fmtTok(combinedOut)} (Main ${fmtTok(totalOut)} + Sub ${fmtTok(childOut)})</span></div>`
             : `<div class="ag-tt-row"><span class="ag-tt-lbl">累计输出量</span><span class="ag-tt-val">总计 ${fmtTok(combinedOut)} (主 ${fmtTok(totalOut)} + 子 ${fmtTok(childOut)})</span></div>`
-          : isEnMetrics
-            ? `<div class="ag-tt-row"><span class="ag-tt-lbl">Total Output</span><span class="ag-tt-val">Total ${fmtTok(totalOut)} (Think ${fmtTok(totalThink)} + Resp ${fmtTok(totalResp)})</span></div>`
-            : `<div class="ag-tt-row"><span class="ag-tt-lbl">累计输出量</span><span class="ag-tt-val">总计 ${fmtTok(totalOut)} (思考链 ${fmtTok(totalThink)} + 正文/工具 ${fmtTok(totalResp)})</span></div>`;
+          : sessionAllThinkUnreported
+            ? isEnMetrics
+              ? `<div class="ag-tt-row"><span class="ag-tt-lbl">Total Output</span><span class="ag-tt-val">Total ${fmtTok(totalOut)} (Think+Resp merged)</span></div>`
+              : `<div class="ag-tt-row"><span class="ag-tt-lbl">累计输出量</span><span class="ag-tt-val">总计 ${fmtTok(totalOut)} (接口合并计入思考链)</span></div>`
+            : isEnMetrics
+              ? `<div class="ag-tt-row"><span class="ag-tt-lbl">Total Output</span><span class="ag-tt-val">Total ${fmtTok(totalOut)} (Think ${fmtTok(totalThink)} + Resp ${fmtTok(totalResp)})</span></div>`
+              : `<div class="ag-tt-row"><span class="ag-tt-lbl">累计输出量</span><span class="ag-tt-val">总计 ${fmtTok(totalOut)} (思考链 ${fmtTok(totalThink)} + 正文/工具 ${fmtTok(totalResp)})</span></div>`;
+      const stepOutValEn = last.thinkUnreported
+        ? `${fmtNum(last.outTok)} (Think+Resp merged)`
+        : `${fmtNum(last.outTok)} (Think ${fmtNum(last.thinkTok)} + Resp ${fmtNum(last.respTok)})`;
+      const stepOutValZh = last.thinkUnreported
+        ? `${fmtNum(last.outTok)} (接口合并计入思考链)`
+        : `${fmtNum(last.outTok)} (思考链 ${fmtNum(last.thinkTok)} + 正文/工具 ${fmtNum(last.respTok)})`;
 
       tooltipHtml = isEnMetrics
         ? [
@@ -2507,9 +2577,9 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
             `<div class="ag-tt-row"><span class="ag-tt-lbl">Throughput</span><span class="ag-tt-val">${useStream ? `Stream ${rawStreamTps.toFixed(1)} tok/s | ` : ''}E2E ${e2eTps.toFixed(1)} tok/s</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">Latency</span><span class="ag-tt-val">${useStream ? `TTFT ${last.ttft.toFixed(2)}s | Stream ${last.stream.toFixed(2)}s | Total ${last.totDur.toFixed(2)}s` : `Wait ${last.ttft.toFixed(2)}s | Flush ${last.stream.toFixed(2)}s | Total ${last.totDur.toFixed(2)}s`}</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">Context</span><span class="ag-tt-val">${fmtNum(last.ctx)} (New ${fmtNum(last.inTok)} + Cache ${fmtNum(last.cacheRead)}, ${lastCacheRate}%)</span></div>`,
-            `<div class="ag-tt-row"><span class="ag-tt-lbl">Step Output</span><span class="ag-tt-val">${fmtNum(last.outTok)} (Think ${fmtNum(last.thinkTok)} + Resp ${fmtNum(last.respTok)})</span></div>`,
+            `<div class="ag-tt-row"><span class="ag-tt-lbl">Step Output</span><span class="ag-tt-val">${stepOutValEn}</span></div>`,
             turnRowHtml,
-            `<div class="ag-tt-hdr ag-tt-sec">Session Total (${userStepsCount} turns / ${valid.length} calls)</div>`,
+            `<div class="ag-tt-hdr ag-tt-sec">Session Total (${userStepsCount} ${turnsUnitEn} / ${valid.length} calls)</div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">Compaction</span><span class="ag-tt-val">${fmtTok(last.ctx)} / ${limitStr} (${ctxPct}%) · ${fmtTok(remainCtx)} left</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">Total Input</span><span class="ag-tt-val">New ${fmtTok(totalIn)} + Cache ${fmtTok(totalCache)} (${sessionCacheRate}% hit)</span></div>`,
             subRowHtml,
@@ -2520,9 +2590,9 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
             `<div class="ag-tt-row"><span class="ag-tt-lbl">生成速度</span><span class="ag-tt-val">${useStream ? `流式 ${rawStreamTps.toFixed(1)} tok/s | ` : ''}端到端（含等待） ${e2eTps.toFixed(1)} tok/s</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">响应耗时</span><span class="ag-tt-val">${useStream ? `TTFT ${last.ttft.toFixed(2)}s | 流式 ${last.stream.toFixed(2)}s | 总计 ${last.totDur.toFixed(2)}s` : `等待 ${last.ttft.toFixed(2)}s | 刷出 ${last.stream.toFixed(2)}s | 总计 ${last.totDur.toFixed(2)}s`}</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">当前上下文</span><span class="ag-tt-val">${fmtNum(last.ctx)} (新增 ${fmtNum(last.inTok)} + 缓存 ${fmtNum(last.cacheRead)}, ${lastCacheRate}%)</span></div>`,
-            `<div class="ag-tt-row"><span class="ag-tt-lbl">本步输出量</span><span class="ag-tt-val">${fmtNum(last.outTok)} (思考链 ${fmtNum(last.thinkTok)} + 正文/工具 ${fmtNum(last.respTok)})</span></div>`,
+            `<div class="ag-tt-row"><span class="ag-tt-lbl">本步输出量</span><span class="ag-tt-val">${stepOutValZh}</span></div>`,
             turnRowHtml,
-            `<div class="ag-tt-hdr ag-tt-sec">当前会话累计 (${userStepsCount} 轮提问 / ${valid.length} 次有效调用)</div>`,
+            `<div class="ag-tt-hdr ag-tt-sec">当前会话累计 (${userStepsCount} ${turnsUnitZh} / ${valid.length} 次有效调用)</div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">压缩水位线</span><span class="ag-tt-val">${fmtTok(last.ctx)} / ${limitStr} (${ctxPct}%) · 距压缩余 ${fmtTok(remainCtx)}</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">累计输入量</span><span class="ag-tt-val">新增 ${fmtTok(totalIn)} + 缓存读取 ${fmtTok(totalCache)} (命中率 ${sessionCacheRate}%)</span></div>`,
             subRowHtml,
@@ -2550,8 +2620,10 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
       const turnDurStr = effectiveTurnDur >= 10 ? `${Math.round(effectiveTurnDur)}s` : `${effectiveTurnDur.toFixed(1)}s`;
 
       const effectiveTurnIn = turnSteps > 0 ? turnIn : last.inTok;
+      const effectiveTurnOut = turnSteps > 0 ? turnOut : last.outTok;
       const effectiveTurnThink = turnSteps > 0 ? turnThink : last.thinkTok;
       const effectiveTurnResp = turnSteps > 0 ? turnResp : last.respTok;
+      const effectiveThinkUnreported = turnSteps > 0 ? turnAllThinkUnreported : Boolean(last.thinkUnreported);
       const splitSum = (effectiveTurnThink || 0) + (effectiveTurnResp || 0);
       const thinkRatioPct = splitSum > 0 ? Math.round(((effectiveTurnThink || 0) / splitSum) * 100) : 0;
       const respRatioPct = 100 - thinkRatioPct;
@@ -2562,23 +2634,32 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
       const sessionCacheTier = resolveCacheTier(Number(sessionCacheRate) || 0);
       const ctxVolTier = last.ctx > 400000 ? 'bad' : last.ctx >= 200000 ? 'fair' : 'good';
 
+      const compactSplitRowEn = effectiveThinkUnreported
+        ? `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">Output</span><span class="ag-tt-val">${fmtTok(effectiveTurnOut)} <span class="ag-tt-lbl">(Think+Resp merged)</span></span></div>`
+        : `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">Output Split</span><span class="ag-tt-split-group"><span class="ag-tt-split-ratio ag-tt-think-lbl">Think ${thinkRatioPct}%</span><span class="ag-tt-split-track"><span class="ag-tt-split-think" style="width:${thinkRatioPct}%"></span><span class="ag-tt-split-resp" style="width:${respRatioPct}%"></span></span><span class="ag-tt-split-ratio ag-tt-resp-lbl">Resp ${respRatioPct}%</span></span></div>`;
+      const compactSplitRowZh = effectiveThinkUnreported
+        ? `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">本轮输出</span><span class="ag-tt-val">${fmtTok(effectiveTurnOut)} <span class="ag-tt-lbl">(接口合并计入思考链)</span></span></div>`
+        : `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">输出比例</span><span class="ag-tt-split-group"><span class="ag-tt-split-ratio ag-tt-think-lbl">思维链 ${thinkRatioPct}%</span><span class="ag-tt-split-track"><span class="ag-tt-split-think" style="width:${thinkRatioPct}%"></span><span class="ag-tt-split-resp" style="width:${respRatioPct}%"></span></span><span class="ag-tt-split-ratio ag-tt-resp-lbl">正文/工具 ${respRatioPct}%</span></span></div>`;
+      const turnHdrLabelEn = isSubagentWakeTurns ? `Wake #${turnDisplayNum}` : `Turn #${turnDisplayNum}`;
+      const turnHdrLabelZh = isSubagentWakeTurns ? `第${turnDisplayNum}次唤醒` : `第${turnDisplayNum}轮`;
+
       tooltipHtml = isEnMetrics
         ? [
-            `<div class="ag-tt-hdr"><span>Current Turn</span><span class="ag-tt-hdr-meta">Turn #${turnDisplayNum} · ${effectiveTurnSteps} ${effectiveTurnSteps === 1 ? 'step' : 'steps'} · ${turnDurStr}</span></div>`,
+            `<div class="ag-tt-hdr"><span>Current Turn</span><span class="ag-tt-hdr-meta">${turnHdrLabelEn} · ${effectiveTurnSteps} ${effectiveTurnSteps === 1 ? 'step' : 'steps'} · ${turnDurStr}</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">Throughput</span><span class="ag-tt-val">${useStream ? `Stream ${rawStreamTps.toFixed(1)} tok/s | ` : ''}E2E ${e2eTps.toFixed(1)} tok/s</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">Latency</span><span class="ag-tt-val">${useStream ? `TTFT ${last.ttft.toFixed(2)}s | Stream ${last.stream.toFixed(2)}s | Total ${last.totDur.toFixed(2)}s` : `Wait ${last.ttft.toFixed(2)}s | Flush ${last.stream.toFixed(2)}s | Total ${last.totDur.toFixed(2)}s`}</span></div>`,
             `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">Net Input</span><span class="ag-tt-compact-right"><span class="ag-tt-val">+${fmtTok(effectiveTurnIn)}</span><span class="ag-tt-cache-tag ag-cache-${lastCacheTier}">Cache ${lastCacheRate}%</span></span></div>`,
-            `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">Output Split</span><span class="ag-tt-split-group"><span class="ag-tt-split-ratio ag-tt-think-lbl">Think ${thinkRatioPct}%</span><span class="ag-tt-split-track"><span class="ag-tt-split-think" style="width:${thinkRatioPct}%"></span><span class="ag-tt-split-resp" style="width:${respRatioPct}%"></span></span><span class="ag-tt-split-ratio ag-tt-resp-lbl">Resp ${respRatioPct}%</span></span></div>`,
-            `<div class="ag-tt-hdr ag-tt-sec"><span>Session Total</span><span class="ag-tt-hdr-meta">${userStepsCount} turns / ${valid.length} calls</span></div>`,
+            compactSplitRowEn,
+            `<div class="ag-tt-hdr ag-tt-sec"><span>Session Total</span><span class="ag-tt-hdr-meta">${userStepsCount} ${turnsUnitEn} / ${valid.length} calls</span></div>`,
             `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-bar-group"><span class="ag-tt-ctx-bar"><span class="ag-tt-ctx-fill ${ctxClass}" style="width:${clampedPct}%"></span></span><span class="ag-tt-bar-lbl ag-tt-num-${ctxVolTier}">${fmtTok(last.ctx)}/${limitStr} (${ctxPct}%)</span></span><span class="ag-tt-nowrap"><span class="ag-tt-lbl">Avg Cache </span><span class="ag-tt-val ag-tt-num-${sessionCacheTier}">${sessionCacheRate}%</span></span></div>`
           ].join('')
         : [
-            `<div class="ag-tt-hdr"><span>当前轮次</span><span class="ag-tt-hdr-meta">第${turnDisplayNum}轮 总${effectiveTurnSteps}步 共耗时${turnDurStr}</span></div>`,
+            `<div class="ag-tt-hdr"><span>当前轮次</span><span class="ag-tt-hdr-meta">${turnHdrLabelZh} 总${effectiveTurnSteps}步 共耗时${turnDurStr}</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">生成速度</span><span class="ag-tt-val">${useStream ? `流式 ${rawStreamTps.toFixed(1)} tok/s | ` : ''}端到端 ${e2eTps.toFixed(1)} tok/s</span></div>`,
             `<div class="ag-tt-row"><span class="ag-tt-lbl">响应耗时</span><span class="ag-tt-val">${useStream ? `TTFT ${last.ttft.toFixed(2)}s | 流式 ${last.stream.toFixed(2)}s | 总计 ${last.totDur.toFixed(2)}s` : `等待 ${last.ttft.toFixed(2)}s | 刷出 ${last.stream.toFixed(2)}s | 总计 ${last.totDur.toFixed(2)}s`}</span></div>`,
             `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">本轮净增</span><span class="ag-tt-compact-right"><span class="ag-tt-val">+${fmtTok(effectiveTurnIn)}</span><span class="ag-tt-cache-tag ag-cache-${lastCacheTier}">缓存率 ${lastCacheRate}%</span></span></div>`,
-            `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-lbl">输出比例</span><span class="ag-tt-split-group"><span class="ag-tt-split-ratio ag-tt-think-lbl">思维链 ${thinkRatioPct}%</span><span class="ag-tt-split-track"><span class="ag-tt-split-think" style="width:${thinkRatioPct}%"></span><span class="ag-tt-split-resp" style="width:${respRatioPct}%"></span></span><span class="ag-tt-split-ratio ag-tt-resp-lbl">正文/工具 ${respRatioPct}%</span></span></div>`,
-            `<div class="ag-tt-hdr ag-tt-sec"><span>会话总计</span><span class="ag-tt-hdr-meta">${userStepsCount} 轮提问 / ${valid.length} 次调用</span></div>`,
+            compactSplitRowZh,
+            `<div class="ag-tt-hdr ag-tt-sec"><span>会话总计</span><span class="ag-tt-hdr-meta">${userStepsCount} ${turnsUnitZh} / ${valid.length} 次调用</span></div>`,
             `<div class="ag-tt-row ag-tt-row-merged"><span class="ag-tt-bar-group"><span class="ag-tt-ctx-bar"><span class="ag-tt-ctx-fill ${ctxClass}" style="width:${clampedPct}%"></span></span><span class="ag-tt-bar-lbl ag-tt-num-${ctxVolTier}">${fmtTok(last.ctx)}/${limitStr} (${ctxPct}%)</span></span><span class="ag-tt-nowrap"><span class="ag-tt-lbl">全轮次平均缓存 </span><span class="ag-tt-val ag-tt-num-${sessionCacheTier}">${sessionCacheRate}%</span></span></div>`,
             zhWarnRowHtml
           ].join('');
@@ -2590,6 +2671,7 @@ function parseConversationMetrics(cascadeId, endpointOrDir, precomputedState = n
     const payload = {
       cascadeId,
       hasData: true,
+      dbFound: true,
       sig: compositeSig,
       isDraining,
       partialStale,
@@ -3218,7 +3300,10 @@ function attachTarget(target, endpoint) {
         }
       };
 
-      const syncMetricsForSession = async (force = false, skipDomEval = false) => {
+      let metricsSyncInFlight = null;
+      let queuedMetricsSync = null;
+
+      const syncMetricsForSessionInner = async (force = false, skipDomEval = false) => {
         if (target.type === 'iframe' || !DatabaseSync || !activeConfig.modules.metrics || !activeConfig.enabled) return;
 
         // 仅在尚未获知前端订阅或强制重同步时向前端发起 Runtime.evaluate，日常靠 __agRequestMetrics 绑定事件实时驱动
@@ -3317,7 +3402,7 @@ function attachTarget(target, endpoint) {
             continue;
           }
 
-          const renderedSig = `${payload.hasData ? '1' : '0'}\n${payload.inlineHtml || ''}\n${payload.tooltipHtml || ''}`;
+          const renderedSig = `${payload.hasData ? '1' : '0'}:${payload.dbFound ? '1' : '0'}\n${payload.inlineHtml || ''}\n${payload.tooltipHtml || ''}`;
           if (force || renderedSig !== cState.lastRenderedSig) {
             pendingUpdates.push({
               payload,
@@ -3348,6 +3433,32 @@ function attachTarget(target, endpoint) {
             }
           }
         }
+      };
+
+      const syncMetricsForSession = async (force = false, skipDomEval = false) => {
+        if (metricsSyncInFlight) {
+          queuedMetricsSync = {
+            force: Boolean(queuedMetricsSync?.force || force),
+            skipDomEval: queuedMetricsSync ? Boolean(queuedMetricsSync.skipDomEval && skipDomEval) : Boolean(skipDomEval)
+          };
+          return metricsSyncInFlight;
+        }
+        metricsSyncInFlight = (async () => {
+          let curForce = force;
+          let curSkip = skipDomEval;
+          try {
+            while (true) {
+              await syncMetricsForSessionInner(curForce, curSkip);
+              if (!queuedMetricsSync) break;
+              curForce = queuedMetricsSync.force;
+              curSkip = queuedMetricsSync.skipDomEval;
+              queuedMetricsSync = null;
+            }
+          } finally {
+            metricsSyncInFlight = null;
+          }
+        })();
+        return metricsSyncInFlight;
       };
 
       const checkAndInject = async () => {
